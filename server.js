@@ -409,6 +409,7 @@ function compactSchema(schema, depth = 0) {
   const out = {};
 
   if (typeof schema.type === "string") out.type = schema.type;
+  if (typeof schema.description === "string" && schema.description.length > 0) out.description = schema.description.slice(0, 200);
   if (Array.isArray(schema.required) && schema.required.length > 0) out.required = schema.required;
   if (Array.isArray(schema.enum) && schema.enum.length > 0) out.enum = schema.enum.slice(0, 20);
 
@@ -512,13 +513,14 @@ function encodeToolCallsBlock(toolCalls, flavor = "default") {
   ].join("\n");
 }
 
-function encodeToolResultBlock(message, flavor = "default") {
+function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
   const callPayloadExample = flavor === "kimi"
     ? `{"tool_name":"read","tool_input":{"filePath":"src/app.js"}}`
     : `{"name":"read","arguments":{"filePath":"src/app.js"}}`;
   const nextStepRule = isSingleCallFlavor(flavor)
     ? "Reply with exactly one CALL block inside one tool envelope, or one final envelope. Do not batch multiple tool calls in one reply."
     : `If more than one independent tool call is needed, include multiple CALL blocks (up to ${MAX_PARALLEL_TOOL_CALLS} maximum). Do not exceed ${MAX_PARALLEL_TOOL_CALLS} CALL blocks in one reply.`;
+  const hasTodo = toolNames.includes("todowrite");
   const payload = {
     tool_call_id: message.tool_call_id || "",
     content: contentPartsToText(message.content)
@@ -543,6 +545,8 @@ function encodeToolResultBlock(message, flavor = "default") {
     "If an edit could match multiple places, read more context first and then send a larger oldString.",
     "Do not use legacy forms like [question], [write], [read], or raw tool_calls JSON unless recovery is needed.",
     nextStepRule,
+    hasTodo ? "For complex features, remember to update your structured plan using the todowrite tool as needed." : null,
+    toolNames.includes("task") ? "If this result is from a subagent you launched via the 'task' tool, DO NOT duplicate its work. Trust its summary and proceed to the next step of your plan." : null,
     "If a required detail is genuinely missing or the user must choose between materially different options, prefer the question tool instead of guessing."
   ].filter(Boolean).join("\n");
 }
@@ -551,12 +555,39 @@ function encodeUserMessageForBridge(content, options = {}) {
   const text = typeof content === "string" ? content : "";
   const firstTurn = Boolean(options.firstTurn);
   const flavor = options.flavor || "default";
+  const toolNames = options.toolNames || [];
+  const hasTodo = toolNames.includes("todowrite");
+  const hasTask = toolNames.includes("task");
   const callPayloadExample = flavor === "kimi"
     ? `{"tool_name":"read","tool_input":{"filePath":"src/app.js"}}`
     : `{"name":"read","arguments":{"filePath":"src/app.js"}}`;
   const callCountRule = isSingleCallFlavor(flavor)
     ? `- Use exactly one ${CALL_MODE_MARKER} block per reply.`
     : `- If several independent operations are immediately needed, you may include multiple ${CALL_MODE_MARKER} blocks in the same tool envelope.`;
+
+  const planningHint = firstTurn
+    ? (hasTodo && hasTask
+      ? "- If this is a complex task with multiple components, delegate the ACTUAL IMPLEMENTATION of independent components to subagents using the 'task' tool. Use the todowrite tool to track the overall plan."
+      : hasTodo
+        ? "- If this is a complex task, start by creating a step-by-step todo plan using the todowrite tool. Otherwise, act directly on the task."
+        : hasTask
+          ? "- If this is a complex task with decoupled subtasks, use the 'task' tool to launch subagents. Otherwise, act directly on the task."
+          : "- Act directly on the task instead of answering with a generic greeting.")
+    : (hasTodo && hasTask
+      ? "- Continue with the next concrete action. If a subagent just returned, DO NOT duplicate its work—trust its findings and proceed to the next un-delegated component. For complex features, update your structured plan using the todowrite tool as needed."
+      : hasTodo
+        ? "- Continue with the next concrete action. For complex features, update your structured plan using the todowrite tool as needed."
+        : hasTask
+          ? "- Continue with the next concrete action. If a subagent just returned, trust its findings and proceed. Delegate independent subproblems via the 'task' tool when appropriate."
+          : "- Continue with the next concrete action, not a narration step.");
+
+  const taskExample = hasTask
+    ? (flavor === "kimi"
+      ? `\n- Example for delegating to subagent:\n  {"tool_name":"task","tool_input":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
+      : `\n- Example for delegating to subagent:\n  {"name":"task","arguments":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
+    )
+    : "";
+
   return [
     text,
     "",
@@ -575,14 +606,14 @@ function encodeUserMessageForBridge(content, options = {}) {
     "- If you genuinely need clarification before acting, prefer the question tool instead of guessing.",
     "- Do not use [question], [write], [read], or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
-    firstTurn
-      ? "- On the first assistant turn, if the user already gave a concrete task, prefer acting on it directly rather than replying with a generic greeting or conversation opener."
-      : "- Continue with the next concrete action, not a narration step."
+    planningHint,
+    taskExample
   ].filter(Boolean).join("\n");
 }
 
 function buildBridgeSystemMessage(tools, flavor = "default") {
   const catalog = compactToolCatalog(tools);
+  const toolNames = tools.map(t => t.function?.name).filter(Boolean);
   const callExample = flavor === "kimi"
     ? { tool_name: "tool_name", tool_input: { example: true } }
     : { name: "tool_name", arguments: { example: true } };
@@ -634,7 +665,8 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     isSingleCallFlavor(flavor)
       ? "- After each tool result, decide the next single tool call or final answer."
       : "- After each tool result, decide the next tool call or CALL batch.",
-    "- On the first assistant turn for a coding task, usually call a search/read/list tool first.",
+    toolNames.includes("task") ? "- For tasks involving multiple independent files/components, PRIORITIZE using the 'task' tool to launch subagents to DO THE ACTUAL CODING (e.g., subagent_type='general' or 'coder') rather than doing everything yourself. YOU MUST PROVIDE BOTH the `prompt` AND `subagent_type` parameters." : null,
+    toolNames.includes("todowrite") ? "- For complex tasks, use the todowrite tool to maintain a structured plan for the code you write directly." : null,
     "- Use tool names exactly as listed.",
     "- arguments must be a valid JSON object.",
     "- The old tool_calls array JSON shape is still accepted only as a compatibility fallback. Prefer CALL blocks.",
@@ -679,6 +711,7 @@ function translateMessagesForBridge(messages, tools, modelId) {
   let bridgeInserted = false;
   let firstUserSeen = false;
   const flavor = getBridgeFlavor(modelId);
+  const toolNames = (tools || []).map(t => t.function?.name).filter(Boolean);
   const bridgeSystem = { role: "system", content: buildBridgeSystemMessage(tools, flavor) };
 
   for (const message of messages || []) {
@@ -705,14 +738,14 @@ function translateMessagesForBridge(messages, tools, modelId) {
     }
 
     if (message.role === "tool") {
-      out.push({ role: "user", content: encodeToolResultBlock(message, flavor).trim() });
+      out.push({ role: "user", content: encodeToolResultBlock(message, flavor, toolNames).trim() });
       continue;
     }
 
     if (message.role === "user") {
       out.push({
         role: "user",
-        content: encodeUserMessageForBridge(contentPartsToText(message.content), { firstTurn: !firstUserSeen, flavor })
+        content: encodeUserMessageForBridge(contentPartsToText(message.content), { firstTurn: !firstUserSeen, flavor, toolNames })
       });
       firstUserSeen = true;
       continue;
@@ -1042,25 +1075,49 @@ function parseAnyFencedJsonPayload(text) {
 }
 
 function normalizeParsedToolCalls(rawCalls) {
+  const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "mkdir", "rm", "cp", "mv", "pwd", "cd", "echo", "head", "tail", "wc"]);
   const normalizeToolName = (name) => {
     const raw = String(name || "").trim();
     const lower = raw.toLowerCase();
-    if (lower === "shell" || lower === "sh" || lower === "terminal" || lower === "command" || lower === "commandline" || lower === "powershell") {
+    if (shellAliases.has(lower)) {
       return "bash";
     }
     return raw;
   };
 
+  const wrapShellArgs = (toolName, args) => {
+    const lower = String(toolName || "").toLowerCase();
+    if (shellAliases.has(lower) && lower !== "shell" && lower !== "sh" && lower !== "terminal" && lower !== "command" && lower !== "commandline" && lower !== "powershell") {
+      // Model called "ls" as a tool — wrap it into a bash command
+      const cmdArg = args.path || args.filePath || args.directory || args.dir || ".";
+      return { command: `${lower} ${cmdArg}`.trim(), description: `Run ${lower}` };
+    }
+    return args;
+  };
+
   return rawCalls
-    .filter((call) => call && typeof call === "object" && typeof call.name === "string")
-    .map((call) => ({
-      id: generateToolCallId(),
-      type: "function",
-      function: {
-        name: normalizeToolName(call.name),
-        arguments: normalizeJsonString(call.arguments || {})
-      }
-    }));
+    .filter((call) => call && typeof call === "object")
+    .map((call) => {
+      const name = typeof call.name === "string" ? call.name :
+        typeof call.tool_name === "string" ? call.tool_name : "";
+
+      const args = call.arguments ? call.arguments :
+        call.tool_input ? call.tool_input : {};
+
+      if (!name) return null;
+
+      const finalArgs = wrapShellArgs(name, args);
+
+      return {
+        id: generateToolCallId(),
+        type: "function",
+        function: {
+          name: normalizeToolName(name),
+          arguments: normalizeJsonString(finalArgs)
+        }
+      };
+    })
+    .filter(Boolean);
 }
 
 function startsWithMarker(text, marker) {
