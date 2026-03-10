@@ -567,24 +567,20 @@ function encodeUserMessageForBridge(content, options = {}) {
 
   const planningHint = firstTurn
     ? (hasTodo && hasTask
-      ? "- If this is a complex task with multiple components, delegate the ACTUAL IMPLEMENTATION of independent components to subagents using the 'task' tool. Use the todowrite tool to track the overall plan."
+      ? "- If this is a complex task, start by creating a step-by-step plan using the todowrite tool. The 'task' tool is available for genuinely independent subtasks, but prefer doing the work directly."
       : hasTodo
         ? "- If this is a complex task, start by creating a step-by-step todo plan using the todowrite tool. Otherwise, act directly on the task."
         : hasTask
-          ? "- If this is a complex task with decoupled subtasks, use the 'task' tool to launch subagents. Otherwise, act directly on the task."
+          ? "- Act directly on the task. The 'task' tool is available if a subtask is truly independent."
           : "- Act directly on the task instead of answering with a generic greeting.")
-    : (hasTodo && hasTask
-      ? "- Continue with the next concrete action. If a subagent just returned, DO NOT duplicate its work—trust its findings and proceed to the next un-delegated component. For complex features, update your structured plan using the todowrite tool as needed."
-      : hasTodo
-        ? "- Continue with the next concrete action. For complex features, update your structured plan using the todowrite tool as needed."
-        : hasTask
-          ? "- Continue with the next concrete action. If a subagent just returned, trust its findings and proceed. Delegate independent subproblems via the 'task' tool when appropriate."
-          : "- Continue with the next concrete action, not a narration step.");
+    : (hasTodo
+      ? "- Continue with the next concrete action. For complex features, update your structured plan using the todowrite tool as needed."
+      : "- Continue with the next concrete action, not a narration step.");
 
   const taskExample = hasTask
     ? (flavor === "kimi"
-      ? `\n- Example for delegating to subagent:\n  {"tool_name":"task","tool_input":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
-      : `\n- Example for delegating to subagent:\n  {"name":"task","arguments":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
+      ? `\n- If you use the 'task' tool, example format: {"tool_name":"task","tool_input":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
+      : `\n- If you use the 'task' tool, example format: {"name":"task","arguments":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
     )
     : "";
 
@@ -665,7 +661,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     isSingleCallFlavor(flavor)
       ? "- After each tool result, decide the next single tool call or final answer."
       : "- After each tool result, decide the next tool call or CALL batch.",
-    toolNames.includes("task") ? "- For tasks involving multiple independent files/components, PRIORITIZE using the 'task' tool to launch subagents to DO THE ACTUAL CODING (e.g., subagent_type='general' or 'coder') rather than doing everything yourself. YOU MUST PROVIDE BOTH the `prompt` AND `subagent_type` parameters." : null,
+    toolNames.includes("task") ? "- If you use the 'task' tool, YOU MUST provide both `prompt` and `subagent_type` parameters." : null,
     toolNames.includes("todowrite") ? "- For complex tasks, use the todowrite tool to maintain a structured plan for the code you write directly." : null,
     "- Use tool names exactly as listed.",
     "- arguments must be a valid JSON object.",
