@@ -1105,7 +1105,11 @@ function parseAnyFencedJsonPayload(text) {
 }
 
 function normalizeParsedToolCalls(rawCalls) {
-  const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "mkdir", "rm", "cp", "mv", "pwd", "cd", "echo", "head", "tail", "wc"]);
+  // Only safe commands are aliased to bash.
+  // rm, cp, mv, cd are intentionally excluded — if the model hallucinates those
+  // as tool names they should fail cleanly rather than silently execute destructive ops.
+  // mkdir/rmdir are safe: mkdir creates dirs, rmdir only removes empty ones.
+  const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "pwd", "echo", "head", "tail", "mkdir", "rmdir"]);
   const normalizeToolName = (name) => {
     const raw = String(name || "").trim();
     const lower = raw.toLowerCase();
@@ -1117,10 +1121,16 @@ function normalizeParsedToolCalls(rawCalls) {
 
   const wrapShellArgs = (toolName, args) => {
     const lower = String(toolName || "").toLowerCase();
-    if (shellAliases.has(lower) && lower !== "shell" && lower !== "sh" && lower !== "terminal" && lower !== "command" && lower !== "commandline" && lower !== "powershell") {
-      // Model called "ls" as a tool — wrap it into a bash command
-      const cmdArg = args.path || args.filePath || args.directory || args.dir || ".";
-      return { command: `${lower} ${cmdArg}`.trim(), description: `Run ${lower}` };
+    const isGenericWrapper = ["shell", "sh", "terminal", "command", "commandline", "powershell"].includes(lower);
+    if (shellAliases.has(lower) && !isGenericWrapper) {
+      // Model called e.g. "ls" as a tool — wrap into bash with a quoted path argument
+      const rawPath = args && typeof args === "object"
+        ? (args.path || args.filePath || args.directory || args.dir || ".")
+        : ".";
+      // Quote the path to handle spaces; strip shell metacharacters and line breaks.
+      // Also remove quotes so the wrapped command cannot break out of the quoted arg.
+      const safePath = String(rawPath).replace(/[;|&`$"\r\n]/g, "");
+      return { command: `${lower} "${safePath}"`.trim(), description: `Run ${lower}` };
     }
     return args;
   };
