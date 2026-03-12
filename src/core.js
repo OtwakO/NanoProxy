@@ -467,9 +467,6 @@ function encodeToolCallsBlock(toolCalls, flavor = "default") {
 }
 
 function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
-  const callPayloadExample = flavor === "kimi"
-    ? `{"tool_name":"read","tool_input":{"filePath":"src/app.js"}}`
-    : `{"name":"read","arguments":{"filePath":"src/app.js"}}`;
   const nextStepRule = isSingleCallFlavor(flavor)
     ? "Reply with exactly one CALL block inside one tool envelope, or one final envelope. Do not batch multiple tool calls in one reply."
     : `If more than one independent tool call is needed, include multiple CALL blocks (up to ${MAX_TOOL_CALLS_PER_TURN} maximum). Do not exceed ${MAX_TOOL_CALLS_PER_TURN} CALL blocks in one reply.`;
@@ -515,7 +512,6 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
     "Continue from this tool result.",
     `Your next reply must use exactly one of these formats: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
     `For tool use, only use ${CALL_MODE_MARKER} ... ${CALL_MODE_END_MARKER} blocks inside ${TOOL_MODE_MARKER}.`,
-    `Inside each CALL block, use exactly this JSON shape: ${callPayloadExample}`,
     isSingleCallFlavor(flavor)
       ? `Always include the outer ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} wrapper.`
       : null,
@@ -538,9 +534,6 @@ function encodeUserMessageForBridge(content, options = {}) {
   const toolNames = options.toolNames || [];
   const hasTodo = toolNames.includes("todowrite");
   const hasTask = toolNames.includes("task");
-  const callPayloadExample = flavor === "kimi"
-    ? `{"tool_name":"read","tool_input":{"filePath":"src/app.js"}}`
-    : `{"name":"read","arguments":{"filePath":"src/app.js"}}`;
   const callCountRule = isSingleCallFlavor(flavor)
     ? `- Use exactly one ${CALL_MODE_MARKER} block per reply.`
     : `- If several independent operations are immediately needed, you may include multiple ${CALL_MODE_MARKER} blocks in the same tool envelope.`;
@@ -572,8 +565,8 @@ function encodeUserMessageForBridge(content, options = {}) {
     `- If you need to inspect, search, read, edit, write, or plan work, reply with ${TOOL_MODE_MARKER}.`,
     `- Always include the outer ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} wrapper for tool use.`,
     `- Inside ${TOOL_MODE_MARKER}, only use ${CALL_MODE_MARKER} JSON ${CALL_MODE_END_MARKER}.`,
-    `- Inside each CALL block, use exactly this JSON shape: ${callPayloadExample}`,
     callCountRule,
+    `- If you emit multiple ${CALL_MODE_MARKER} blocks, finish the current CALL JSON object completely before starting the next ${CALL_MODE_MARKER}.`,
     isSingleCallFlavor(flavor)
       ? `- Do not output a second ${CALL_MODE_MARKER} until the first tool result comes back.`
       : null,
@@ -606,6 +599,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Tool bridge mode is enabled.",
     "The upstream provider's native tool calling is disabled for this request.",
     "Your highest priority is protocol compliance.",
+    "Keep reasoning in plain natural language. Never output protocol markers, field names, or JSON/schema fragments in reasoning.",
     "Only two reply formats are valid.",
     `1. Tool format: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}`,
     `2. Final format: ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}`,
@@ -623,6 +617,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Rules for tool use:",
     `- Output ${TOOL_MODE_MARKER} first and ${TOOL_MODE_END_MARKER} last.`,
     `- For each tool call, wrap it in ${CALL_MODE_MARKER} and ${CALL_MODE_END_MARKER}.`,
+    `- If you emit multiple ${CALL_MODE_MARKER} blocks, fully finish one CALL's JSON object before opening the next ${CALL_MODE_MARKER}.`,
     "- Do not use markdown code fences for tool replies.",
     "- Do not write any explanatory prose before, inside, or after the tool envelope.",
     "- Do not use legacy bracketed formats like [question], [write], [read], or [toolname].",
@@ -1281,7 +1276,7 @@ function extractProgressiveToolSource(text) {
   return null;
 }
 
-function extractCallEnvelopes(text, allowPartial = false) {
+function extractCallEnvelopes(text, allowPartial = false, includeMeta = false) {
   const source = String(text || "");
   const out = [];
   let cursor = 0;
@@ -1296,18 +1291,49 @@ function extractCallEnvelopes(text, allowPartial = false) {
     if (!end) {
       const nextCall = findMarkerStart(afterStart, CALL_MODE_MARKER_ALIASES, LOOSE_CALL_START_REGEX);
       if (nextCall && nextCall.index > 0) {
-        out.push(afterStart.slice(0, nextCall.index).trim());
+        const text = afterStart.slice(0, nextCall.index).trim();
+        out.push(includeMeta ? { text, implicitBoundary: true } : text);
         cursor = afterStartIndex + nextCall.index;
         continue;
       }
-      if (allowPartial) out.push(afterStart.trim());
+      if (allowPartial) {
+        const text = afterStart.trim();
+        out.push(includeMeta ? { text, implicitBoundary: false } : text);
+      }
       break;
     }
-    out.push(afterStart.slice(0, end.index).trim());
+    const text = afterStart.slice(0, end.index).trim();
+    out.push(includeMeta ? { text, implicitBoundary: false } : text);
     cursor = afterStartIndex + end.index + end.length;
   }
 
   return out;
+}
+
+function salvageBoundaryClosedToolCalls(envelopeText) {
+  const source = String(envelopeText || "").trim();
+  if (!source) return null;
+
+  const attempts = [closeUnbalancedJson(source)];
+  const firstObjectStart = source.indexOf("{");
+  if (firstObjectStart !== -1) {
+    attempts.push(closeUnbalancedJson(source.slice(firstObjectStart)));
+  }
+
+  for (const attempt of attempts) {
+    const toolCalls = bestEffortParseToolPayload(attempt);
+    if (toolCalls && toolCalls.length > 0) return toolCalls;
+  }
+
+  return null;
+}
+
+function parseCallEnvelopeWithFallback(envelopeText, allowSalvage = true) {
+  let toolCalls = bestEffortParseToolPayload(envelopeText);
+  if ((!toolCalls || toolCalls.length === 0) && allowSalvage) {
+    toolCalls = salvageBoundaryClosedToolCalls(envelopeText);
+  }
+  return toolCalls;
 }
 
 function extractCompletedToolCallObjectTexts(text) {
@@ -1390,11 +1416,11 @@ function extractProgressiveToolCalls(text) {
   const payload = extractProgressiveToolSource(text);
   if (!payload) return [];
 
-  const callEnvelopes = extractCallEnvelopes(payload, false);
+  const callEnvelopes = extractCallEnvelopes(payload, false, true);
   if (callEnvelopes.length > 0) {
     const recovered = [];
     for (const envelope of callEnvelopes) {
-      const toolCalls = bestEffortParseToolPayload(envelope);
+      const toolCalls = parseCallEnvelopeWithFallback(envelope.text, true);
       if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
     }
     if (recovered.length > 0) return recovered;
@@ -1417,7 +1443,7 @@ function parseBridgeAssistantText(text) {
     if (callEnvelopes.length > 0) {
       const recovered = [];
       for (const envelope of callEnvelopes) {
-        const toolCalls = bestEffortParseToolPayload(envelope);
+        const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
       if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
@@ -1433,7 +1459,7 @@ function parseBridgeAssistantText(text) {
     if (callEnvelopes.length > 0) {
       const recovered = [];
       for (const envelope of callEnvelopes) {
-        const toolCalls = bestEffortParseToolPayload(envelope);
+        const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
       if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
@@ -1447,7 +1473,7 @@ function parseBridgeAssistantText(text) {
   if (callOnlyEnvelopes.length > 0) {
     const recovered = [];
     for (const envelope of callOnlyEnvelopes) {
-      const toolCalls = bestEffortParseToolPayload(envelope);
+      const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
       if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
     }
     if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
@@ -1811,6 +1837,7 @@ module.exports = {
   parseEmbeddedJsonPayload,
   parseAnyFencedJsonPayload,
   bestEffortParseToolPayload,
+  parseCallEnvelopeWithFallback,
   salvageMalformedToolCalls,
   salvageTodowriteArguments,
   decodeJsonStringLiteral,

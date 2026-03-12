@@ -44,6 +44,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   const generateToolCallId = core.generateToolCallId
   const applyChunkToAggregate = core.applyChunkToAggregate
   const extractProgressiveToolCalls = core.extractProgressiveToolCalls
+  const extractCallEnvelopes = core.extractCallEnvelopes
   const extractStreamableFinalContent = core.extractStreamableFinalContent
   const MAX_TOOL_CALLS_PER_TURN = core.MAX_TOOL_CALLS_PER_TURN
 
@@ -212,6 +213,22 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
             const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning)
             log({ ...dbgData, event: "stream_done", kind: result.kind })
             dbg({ ...dbgData, event: "stream_raw_content", content: aggregate.content, reasoning: aggregate.reasoning.slice(0, 200) })
+            try {
+              const rawClosedCallCount = typeof extractCallEnvelopes === "function"
+                ? extractCallEnvelopes(aggregate.content, false, false).length
+                : 0
+              const parsedCallCount = result.kind === "tool_calls"
+                ? (result.message.tool_calls || []).length
+                : 0
+              if (rawClosedCallCount > parsedCallCount) {
+                dbg({
+                  ...dbgData,
+                  event: "stream_dropped_calls_suspected",
+                  rawClosedCallCount,
+                  parsedCallCount
+                })
+              }
+            } catch (e) {}
             writeDebugJson(`${dbgData.requestId}-response.json`, {
               requestId: dbgData.requestId,
               kind: result.kind,
