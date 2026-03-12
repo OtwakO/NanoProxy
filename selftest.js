@@ -476,6 +476,13 @@ function run() {
   assert.equal(progressiveClosedCallMarkers.length, 2);
   assert.equal(progressiveClosedCallMarkers[1].function.name, "read");
 
+  const progressiveToolEndImplicitClose = extractProgressiveToolCalls(
+    '[[OPENCODE_TOOL]]\n[[CALL]]\n{"name":"write","arguments":{"filePath":"player.js","content":"player"}}\n[[/CALL]]\n[[CALL]]\n{"name":"write","arguments":{"filePath":"enemy.js","content":"enemy"}}\n[[/OPENCODE_TOOL]]'
+  );
+  assert.equal(progressiveToolEndImplicitClose.length, 2);
+  assert.equal(progressiveToolEndImplicitClose[0].function.arguments, '{"filePath":"player.js","content":"player"}');
+  assert.equal(progressiveToolEndImplicitClose[1].function.arguments, '{"filePath":"enemy.js","content":"enemy"}');
+
   const progressiveCallOnlyMarkers = extractProgressiveToolCalls(
     '[[CALL]]\n{"tool_name":"read","tool_input":{"filePath":"a.txt"}}\n[[/CALL]]\n[[CALL]]\n{"tool_name":"read","tool_input":{"filePath":"b.txt"}}'
   );

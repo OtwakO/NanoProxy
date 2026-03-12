@@ -1298,6 +1298,13 @@ function extractCallEnvelopes(text, allowPartial = false, includeMeta = false) {
         cursor = afterStartIndex + nextCall.index;
         continue;
       }
+      const toolEnd = findMarkerEnd(afterStart, TOOL_MODE_END_MARKER_ALIASES, LOOSE_TOOL_END_REGEX);
+      if (toolEnd && toolEnd.index > 0) {
+        const text = afterStart.slice(0, toolEnd.index).trim();
+        out.push(includeMeta ? { text, implicitBoundary: true } : text);
+        cursor = afterStartIndex + toolEnd.index + toolEnd.length;
+        continue;
+      }
       if (allowPartial) {
         const text = afterStart.trim();
         out.push(includeMeta ? { text, implicitBoundary: false } : text);
