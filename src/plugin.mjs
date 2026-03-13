@@ -39,6 +39,8 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   const requestNeedsBridge = core.requestNeedsBridge
   const transformRequestForBridge = core.transformRequestForBridge
   const tryParseJson = core.tryParseJson
+  const acceptNativeJson = core.acceptNativeJson
+  const acceptNativeSSE = core.acceptNativeSSE
   const buildChatCompletionFromBridge = core.buildChatCompletionFromBridge
   const buildBridgeResultFromText = core.buildBridgeResultFromText
   const generateToolCallId = core.generateToolCallId
@@ -97,6 +99,17 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
   function writeDebugJson(name, value) {
     writeDebugFile(name, JSON.stringify(value, null, 2))
+  }
+
+
+  function sanitizeBufferedResponseHeaders(headersLike, bodyLength, contentTypeOverride) {
+    const headers = new Headers(headersLike || {})
+    headers.delete("content-length")
+    headers.delete("content-encoding")
+    headers.delete("transfer-encoding")
+    if (contentTypeOverride) headers.set("content-type", contentTypeOverride)
+    if (bodyLength !== undefined) headers.set("content-length", String(bodyLength))
+    return headers
   }
 
   log({ event: "init", pid: process.pid, fetch: typeof globalThis.fetch, verbose: VERBOSE, debugEnv: process.env.NANOPROXY_DEBUG })
@@ -415,11 +428,88 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     }
 
     const parsed = tryParseJson(bodyText)
-    if (!parsed.ok || !requestNeedsBridge(parsed.value)) {
+    const hasTools = !!(
+      parsed.ok &&
+      parsed.value &&
+      typeof parsed.value === "object" &&
+      Array.isArray(parsed.value.tools) &&
+      parsed.value.tools.length > 0
+    )
+
+    if (!parsed.ok || !hasTools) {
       return originalFetch(input, init, ...rest)
     }
 
-    const transformed = transformRequestForBridge(parsed.value)
+    const shouldBridgeImmediately = requestNeedsBridge(parsed.value)
+
+    if (!shouldBridgeImmediately) {
+      log({
+        event: "native_first_attempt",
+        requestId,
+        url: urlStr,
+        model: parsed.value.model,
+        toolCount: parsed.value.tools?.length ?? 0,
+      })
+
+      const nativeResponse = await originalFetch(input, init, ...rest)
+      const nativeContentType = nativeResponse.headers.get("content-type") ?? ""
+
+      if (nativeContentType.includes("text/event-stream")) {
+        const streamText = await nativeResponse.text()
+        const nativeSucceeded = acceptNativeSSE(nativeResponse.status, streamText)
+        dbg({
+          event: "native_first_stream_result",
+          requestId,
+          status: nativeResponse.status,
+          accepted: nativeSucceeded,
+        })
+        if (nativeSucceeded) {
+          return new Response(streamText, {
+            status: nativeResponse.status,
+            headers: sanitizeBufferedResponseHeaders(
+              nativeResponse.headers,
+              Buffer.byteLength(streamText),
+              "text/event-stream; charset=utf-8"
+            ),
+          })
+        }
+      } else if (nativeContentType.includes("application/json")) {
+        const jsonText = await nativeResponse.text()
+        const nativeParsed = tryParseJson(jsonText)
+        const nativeSucceeded = nativeParsed.ok && acceptNativeJson(nativeResponse.status, nativeParsed.value)
+        dbg({
+          event: "native_first_json_result",
+          requestId,
+          status: nativeResponse.status,
+          accepted: nativeSucceeded,
+        })
+        if (nativeSucceeded) {
+          return new Response(jsonText, {
+            status: nativeResponse.status,
+            headers: sanitizeBufferedResponseHeaders(
+              nativeResponse.headers,
+              Buffer.byteLength(jsonText),
+              "application/json; charset=utf-8"
+            ),
+          })
+        }
+      } else if (nativeResponse.status >= 200 && nativeResponse.status < 300) {
+        const nativeBuffer = await nativeResponse.arrayBuffer()
+        return new Response(nativeBuffer, {
+          status: nativeResponse.status,
+          headers: sanitizeBufferedResponseHeaders(nativeResponse.headers, nativeBuffer.byteLength),
+        })
+      }
+
+      log({
+        event: "native_first_fallback_to_bridge",
+        requestId,
+        url: urlStr,
+        model: parsed.value.model,
+      })
+    }
+
+    const transformed = transformRequestForBridge(parsed.value, { forceBridge: !shouldBridgeImmediately })
     if (!transformed.bridgeApplied) {
       log({ event: "bridge_skipped", url: urlStr, reason: "no tools or no model match" })
       return originalFetch(input, init, ...rest)
@@ -512,3 +602,5 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 }
 
 export default NanoProxyPlugin;
+
+

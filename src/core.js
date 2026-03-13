@@ -302,12 +302,90 @@ function bestEffortParseToolPayload(text) {
   return null;
 }
 
+function looksLikeBridgeText(text) {
+  return /\[\[\s*\/?\s*OPENCODE_(TOOL|FINAL)\s*\]\]/i.test(text)
+    || /\[\[\s*\/?\s*CALL\s*\]\]/i.test(text);
+}
+
+function looksLikeToolPayload(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return false;
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return false;
+  const parsed = tryParseJson(trimmed);
+  if (!parsed.ok) return false;
+  const value = parsed.value;
+  if (Array.isArray(value?.tool_calls) && value.tool_calls.length > 0) return true;
+  if (value && typeof value === "object" && typeof value.name === "string" && Object.prototype.hasOwnProperty.call(value, "arguments")) return true;
+  return false;
+}
+
+function shouldFallbackFromNativeText(text, finishReason) {
+  const content = contentPartsToText(text).trim();
+  if (finishReason === "tool_calls") return true;
+  if (!content) return true;
+  if (looksLikeBridgeText(content)) return true;
+  if (looksLikeToolPayload(content)) return true;
+  return false;
+}
+
+function acceptNativeJson(status, payload) {
+  if (status < 200 || status >= 300) return false;
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  if (!choice) return false;
+  const message = choice?.message && typeof choice.message === "object" ? choice.message : {};
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true;
+  return !shouldFallbackFromNativeText(message.content, choice?.finish_reason ?? null);
+}
+
+function acceptNativeSSE(status, streamText) {
+  if (status < 200 || status >= 300) return false;
+  const aggregate = { content: "", finishReason: null, nativeToolCallsSeen: false };
+  const events = String(streamText || "").split(/\n\n+/);
+  for (const eventText of events) {
+    const data = eventText
+      .split(/\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") continue;
+    const parsed = tryParseJson(data);
+    if (!parsed.ok) continue;
+    
+    const choice = Array.isArray(parsed.value?.choices) ? parsed.value.choices[0] : null;
+    if (!choice || typeof choice !== "object") continue;
+    const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta : {};
+    if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) aggregate.nativeToolCallsSeen = true;
+    if (Array.isArray(choice?.message?.tool_calls) && choice.message.tool_calls.length > 0) aggregate.nativeToolCallsSeen = true;
+    if (delta.content !== undefined) aggregate.content += contentPartsToText(delta.content);
+    if (choice?.message?.content !== undefined) aggregate.content += contentPartsToText(choice.message.content);
+    if (choice?.finish_reason !== undefined && choice.finish_reason !== null) aggregate.finishReason = choice.finish_reason;
+  }
+  if (aggregate.nativeToolCallsSeen) return true;
+  return !shouldFallbackFromNativeText(aggregate.content, aggregate.finishReason);
+}
+
+function modelNeedsBridge(modelId) {
+  if (process.env.BRIDGE_MODELS === undefined) {
+    return true;
+  }
+  
+  if (process.env.BRIDGE_MODELS.trim() === "") {
+    return false;
+  }
+
+  const allowlist = process.env.BRIDGE_MODELS.split(",").map(m => m.trim().toLowerCase()).filter(Boolean);
+  const lower = String(modelId || "").toLowerCase();
+  return allowlist.some(m => lower.includes(m));
+}
+
 function requestNeedsBridge(body) {
   return !!(
     body &&
     typeof body === "object" &&
     Array.isArray(body.tools) &&
-    body.tools.length > 0
+    body.tools.length > 0 &&
+    modelNeedsBridge(body.model)
   );
 }
 
@@ -733,12 +811,12 @@ function translateMessagesForBridge(messages, tools, modelId) {
 
   return out;
 }
-
-function transformRequestForBridge(body) {
+function transformRequestForBridge(body, options = {}) {
   const rewritten = clone(body);
   const changes = [];
+  const forceBridge = !!options.forceBridge;
 
-  if (!requestNeedsBridge(rewritten)) {
+  if (!forceBridge && !requestNeedsBridge(rewritten)) {
     return { rewritten, changes, bridgeApplied: false, normalizedTools: [] };
   }
 
@@ -761,6 +839,9 @@ function transformRequestForBridge(body) {
   changes.push("tool bridge applied");
   changes.push("native tools removed from upstream request");
   changes.push("bridge system message injected");
+  if (forceBridge) {
+    changes.push("bridge forced after native-first fallback");
+  }
 
   return {
     rewritten,
@@ -1780,6 +1861,8 @@ module.exports = {
   getBridgeFlavor,
   isSingleCallFlavor,
   requestNeedsBridge,
+  acceptNativeJson,
+  acceptNativeSSE,
   normalizeTools,
   normalizeToolDefinition,
   compactToolCatalog,
@@ -1854,3 +1937,4 @@ module.exports = {
   // Clone utility
   clone
 };
+

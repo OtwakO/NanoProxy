@@ -74,6 +74,25 @@ By default these go into:
 - event log: your system temp folder as `nanoproxy-plugin.log`
 - detailed logs: your system temp folder under `nanoproxy-plugin-logs`
 
+### Bridge model selection in OpenCode plugin mode
+
+`BRIDGE_MODELS` must be set in the environment that launches OpenCode.
+
+- Not set: current default behavior. All tool-enabled requests are bridged immediately.
+- `BRIDGE_MODELS=""` (empty): all tool-enabled models try native-first, and fall back to the bridge if native output looks bad.
+- `BRIDGE_MODELS="zai-org/glm-5,moonshotai/kimi-k2.5:thinking"`: only matching models are bridged immediately. All other tool-enabled models try native-first with the same fallback safety net.
+
+Use model IDs, or substrings of model IDs, not display names. For example:
+- `zai-org/glm-5` or `glm-5`
+- `moonshotai/kimi-k2.5:thinking` or `kimi-k2.5`
+
+Example on Windows:
+
+```powershell
+$env:BRIDGE_MODELS = "glm-5,kimi-k2.5"
+opencode
+```
+
 ## Standalone Server Setup
 
 Run the server:
@@ -98,7 +117,25 @@ Optional overrides:
 UPSTREAM_BASE_URL=https://nano-gpt.com/api/v1
 PROXY_HOST=127.0.0.1
 PROXY_PORT=8787
+BRIDGE_MODELS="zai-org/glm-5,moonshotai/kimi-k2.5:thinking" # Optional: bridge only these model IDs (or substrings of them) directly
 node server.js
+```
+
+### Bridge model selection
+`BRIDGE_MODELS` must be set in the environment where you run `node server.js`.
+
+- Not set: current default behavior. All tool-enabled requests are bridged immediately.
+- `BRIDGE_MODELS=""` (empty): all tool-enabled models try native-first, and fall back to the bridge if native output looks bad.
+- `BRIDGE_MODELS="zai-org/glm-5,moonshotai/kimi-k2.5:thinking"`: only matching models are bridged immediately. All other tool-enabled models try native-first with the same fallback safety net.
+
+Use model IDs, or substrings of model IDs, not display names. For example:
+- `zai-org/glm-5` or `glm-5`
+- `moonshotai/kimi-k2.5:thinking` or `kimi-k2.5`
+
+Example:
+
+```sh
+BRIDGE_MODELS="glm-5,kimi-k2.5" node server.js
 ```
 
 ### Server debug logging
@@ -141,6 +178,8 @@ Or with Compose:
 ```sh
 docker compose up --build
 ```
+
+If you want to control bridge-vs-native behavior in Docker, set `BRIDGE_MODELS` in `docker-compose.yml` or with `docker run -e BRIDGE_MODELS=...`.
 
 This still exposes the proxy at:
 
@@ -246,3 +285,5 @@ node selftest.js
 ## License
 
 MIT
+
+

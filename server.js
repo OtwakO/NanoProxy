@@ -28,7 +28,9 @@ const {
   tryParseJson,
   tryParseJsonLenient,
   clone,
-  MAX_TOOL_CALLS_PER_TURN
+  MAX_TOOL_CALLS_PER_TURN,
+  acceptNativeJson,
+  acceptNativeSSE
 } = core;
 
 const LISTEN_HOST = process.env.PROXY_HOST || "127.0.0.1";
@@ -133,10 +135,23 @@ async function proxyRequest(req, res) {
 
   let upstreamBuffer = reqBuffer;
   let bridgeMeta = null;
+  
+  // 1. Check if the user opted this model into native-first
+  const isJsonRequest = (req.headers["content-type"] || "").includes("application/json") && reqText && reqParsed.ok;
+  let attemptNativeFirst = false;
+  
+  if (isJsonRequest && reqParsed.value && typeof reqParsed.value === "object" && Array.isArray(reqParsed.value.tools) && reqParsed.value.tools.length > 0) {
+    if (!core.requestNeedsBridge(reqParsed.value)) {
+      // The core logic (modelNeedsBridge) says this model is exempt from the default bridge.
+      // So we will try it natively first, and fallback if it fails.
+      attemptNativeFirst = true;
+    }
+  }
 
-  if ((req.headers["content-type"] || "").includes("application/json") && reqText && reqParsed.ok) {
+  // 2. If it is NOT a native-first attempt, apply the bridge immediately (Default Fast Path)
+  if (isJsonRequest && !attemptNativeFirst) {
     requestLog.requestBodyOriginal = reqParsed.value;
-    const transformed = transformRequestForBridge(reqParsed.value);
+    const transformed = transformRequestForBridge(reqParsed.value, { forceBridge: true });
     requestLog.requestChanges = transformed.changes;
     requestLog.requestBodyRewritten = transformed.rewritten;
     bridgeMeta = {
@@ -153,11 +168,71 @@ async function proxyRequest(req, res) {
 
   writeJsonLog(path.join(LOG_DIR, `${requestId}-request.json`), requestLog);
 
-  const upstreamResponse = await fetch(upstreamUrl, {
+  // 3. Send the request upstream
+  let upstreamResponse = await fetch(upstreamUrl, {
     method: req.method,
     headers: buildUpstreamHeaders(req.headers, upstreamBuffer.length),
     body: ["GET", "HEAD"].includes(req.method) ? undefined : upstreamBuffer
   });
+
+  // 4. If this was a native-first attempt, validate the response BEFORE streaming it
+  if (attemptNativeFirst) {
+    appendActivity(`request.native_attempt id=${requestId} status=${upstreamResponse.status}`);
+    const contentType = upstreamResponse.headers.get("content-type") || "";
+    let nativeSucceeded = false;
+    let bufferedBody = null;
+    let bufferedText = "";
+
+    try {
+      if (contentType.includes("text/event-stream")) {
+        bufferedText = await upstreamResponse.text();
+        bufferedBody = Buffer.from(bufferedText, "utf8");
+        nativeSucceeded = acceptNativeSSE(upstreamResponse.status, bufferedText);
+      } else if (contentType.includes("application/json")) {
+        bufferedText = await upstreamResponse.text();
+        bufferedBody = Buffer.from(bufferedText, "utf8");
+        const parsedJson = tryParseJson(bufferedText);
+        if (parsedJson.ok) {
+          nativeSucceeded = acceptNativeJson(upstreamResponse.status, parsedJson.value);
+        }
+      } else if (upstreamResponse.status >= 200 && upstreamResponse.status < 300) {
+        nativeSucceeded = true; 
+        bufferedBody = Buffer.from(await upstreamResponse.arrayBuffer());
+      }
+    } catch (e) {
+      nativeSucceeded = false;
+    }
+
+    if (nativeSucceeded) {
+      // Native attempt succeeded! Serve the buffered response to the client.
+      appendActivity(`request.native_success id=${requestId}`);
+      copyResponseHeaders(upstreamResponse.headers, res, bufferedBody ? bufferedBody.length : undefined);
+      res.writeHead(upstreamResponse.status);
+      if (bufferedBody) res.end(bufferedBody);
+      else res.end();
+      return;
+    }
+
+    // Native attempt FAILED. Fallback to the Bridge.
+    appendActivity(`request.native_failed_fallback id=${requestId}`);
+    
+    requestLog.requestChanges = ["native_attempt_failed", "fallback_to_bridge"];
+    const transformed = transformRequestForBridge(reqParsed.value, { forceBridge: true });
+    requestLog.requestBodyRewritten = transformed.rewritten;
+    bridgeMeta = {
+      bridgeApplied: transformed.bridgeApplied,
+      originalRequest: reqParsed.value,
+      upstreamRequest: transformed.rewritten
+    };
+    upstreamBuffer = Buffer.from(JSON.stringify(transformed.rewritten), "utf8");
+    
+    // Execute the SECOND request (The fallback)
+    upstreamResponse = await fetch(upstreamUrl, {
+      method: req.method,
+      headers: buildUpstreamHeaders(req.headers, upstreamBuffer.length),
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : upstreamBuffer
+    });
+  }
 
   const contentType = upstreamResponse.headers.get("content-type") || "";
   if (contentType.includes("text/event-stream")) {
@@ -536,3 +611,4 @@ module.exports = {
   // Re-export core functions for plugin use
   ...core
 };
+
