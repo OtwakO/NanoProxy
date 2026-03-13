@@ -38,6 +38,7 @@ const DEBUG_FLAG_FILE = path.join(__dirname, ".debug-logging");
 const ENABLE_DEBUG_LOGS = process.env.NANO_PROXY_DEBUG === "1" || fs.existsSync(DEBUG_FLAG_FILE);
 const LOG_DIR = path.join(__dirname, "Logs");
 const ACTIVITY_LOG = path.join(LOG_DIR, "activity.log");
+const SSE_HEARTBEAT_INTERVAL_MS = 15000;
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -195,10 +196,35 @@ async function proxyRequest(req, res) {
     let roleSent = false;
     let reasoningSent = 0;
     let emittedToolCalls = 0;
+    let streamClosed = false;
+    let lastDownstreamWriteAt = Date.now();
+    let heartbeatTimer = null;
+
+    const writeDownstream = (text) => {
+      if (streamClosed) return;
+      res.write(text);
+      lastDownstreamWriteAt = Date.now();
+    };
+
+    const stopHeartbeat = () => {
+      if (!heartbeatTimer) return;
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    };
+
+    heartbeatTimer = setInterval(() => {
+      if (streamClosed) return;
+      if (Date.now() - lastDownstreamWriteAt < SSE_HEARTBEAT_INTERVAL_MS) return;
+      try {
+        res.write(": keepalive\n\n");
+        lastDownstreamWriteAt = Date.now();
+      } catch (e) {}
+    }, SSE_HEARTBEAT_INTERVAL_MS);
+    if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
 
     const ensureRole = (aggregate) => {
       if (roleSent) return;
-      res.write(sseLine({
+      writeDownstream(sseLine({
         id: aggregate.id || `chatcmpl_${randomUUID()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -213,7 +239,7 @@ async function proxyRequest(req, res) {
       const deltaText = aggregate.reasoning.slice(reasoningSent);
       reasoningSent = aggregate.reasoning.length;
       ensureRole(aggregate);
-      res.write(sseLine({
+      writeDownstream(sseLine({
         id: aggregate.id || `chatcmpl_${randomUUID()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -228,7 +254,7 @@ async function proxyRequest(req, res) {
       ensureRole(aggregate);
       for (let i = emittedToolCalls; i < progressiveCalls.length; i++) {
         const call = progressiveCalls[i];
-        res.write(sseLine({
+        writeDownstream(sseLine({
           id: aggregate.id || `chatcmpl_${randomUUID()}`,
           object: "chat.completion.chunk",
           created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -334,7 +360,7 @@ async function proxyRequest(req, res) {
     if (result.kind === "final") {
       const finalText = extractStreamableFinalContent(aggregate.content) || result.message.content || "";
       if (finalText) {
-        res.write(sseLine({
+        writeDownstream(sseLine({
           id: aggregate.id || `chatcmpl_${randomUUID()}`,
           object: "chat.completion.chunk",
           created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -342,7 +368,7 @@ async function proxyRequest(req, res) {
           choices: [{ index: 0, delta: { content: finalText }, finish_reason: null }]
         }));
       }
-      res.write(sseLine({
+      writeDownstream(sseLine({
         id: aggregate.id || `chatcmpl_${randomUUID()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -358,7 +384,7 @@ async function proxyRequest(req, res) {
 
     for (const [index, call] of result.message.tool_calls.entries()) {
       if (index < emittedToolCalls) continue;
-      res.write(sseLine({
+      writeDownstream(sseLine({
         id: aggregate.id || `chatcmpl_${randomUUID()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -380,7 +406,7 @@ async function proxyRequest(req, res) {
         }]
       }));
     }
-    res.write(sseLine({
+    writeDownstream(sseLine({
       id: aggregate.id || `chatcmpl_${randomUUID()}`,
       object: "chat.completion.chunk",
       created: aggregate.created || Math.floor(Date.now() / 1000),

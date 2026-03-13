@@ -103,6 +103,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
   const originalFetch = globalThis.fetch
   const encoder = new TextEncoder()
+  const SSE_HEARTBEAT_INTERVAL_MS = 15000
 
   function sseLine(payload) {
     return `data: ${JSON.stringify(payload)}\n\n`
@@ -130,18 +131,38 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     let finalContentSent = 0
     let emittedToolCallCount = 0
     const rawSseFile = `${dbgData.requestId}-stream.sse`
+    let streamClosed = false
+    let lastDownstreamWriteAt = Date.now()
+
+    const writeChunk = async (text) => {
+      if (streamClosed) return
+      lastDownstreamWriteAt = Date.now()
+      await writer.write(encoder.encode(text))
+    }
+
+    const heartbeatTimer = setInterval(async () => {
+      if (streamClosed) return
+      if (Date.now() - lastDownstreamWriteAt < SSE_HEARTBEAT_INTERVAL_MS) return
+      try {
+        await writeChunk(": keepalive\n\n")
+      } catch {}
+    }, SSE_HEARTBEAT_INTERVAL_MS)
+
+    const stopHeartbeat = () => {
+      clearInterval(heartbeatTimer)
+    }
 
     const flushReasoningDelta = async () => {
       if (aggregate.reasoning.length <= reasoningSent) return
       const deltaText = aggregate.reasoning.slice(reasoningSent)
       reasoningSent = aggregate.reasoning.length
-      await writer.write(encoder.encode(sseLine({
+      await writeChunk(sseLine({
         id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
         model: aggregate.model || "tool-bridge",
         choices: [{ index: 0, delta: { reasoning: deltaText }, finish_reason: null }]
-      })))
+      }))
     }
 
     const flushFinalContentDelta = async () => {
@@ -153,13 +174,13 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
       if (!streamable || streamable.length <= finalContentSent) return
       const deltaText = streamable.slice(finalContentSent)
       finalContentSent = streamable.length
-      await writer.write(encoder.encode(sseLine({
+      await writeChunk(sseLine({
         id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
         model: aggregate.model || "tool-bridge",
         choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }]
-      })))
+      }))
     }
 
     const flushProgressiveToolCallsFunc = async () => {
@@ -168,7 +189,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
       dbg({ ...dbgData, event: "stream_progressive_calls", total: calls.length, new: calls.length - emittedToolCallCount, source: "content" })
       for (let i = emittedToolCallCount; i < calls.length; i++) {
         const call = calls[i]
-        await writer.write(encoder.encode(sseLine({
+        await writeChunk(sseLine({
           id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
           object: "chat.completion.chunk",
           created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -185,21 +206,23 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
             },
             finish_reason: null
           }]
-        })))
+        }))
       }
       emittedToolCallCount = calls.length
     }
 
     const finalizeAsToolCalls = async () => {
-      await writer.write(encoder.encode(sseLine({
+      await writeChunk(sseLine({
         id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
         object: "chat.completion.chunk",
         created: aggregate.created || Math.floor(Date.now() / 1000),
         model: aggregate.model || "tool-bridge",
         choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
         ...(aggregate.usage ? { usage: aggregate.usage } : {})
-      })))
-      await writer.write(encoder.encode("data: [DONE]\n\n"))
+      }))
+      await writeChunk("data: [DONE]\n\n")
+      streamClosed = true
+      stopHeartbeat()
       await writer.close()
     }
 
@@ -241,7 +264,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
               const allCalls = result.message.tool_calls || []
               for (let i = emittedToolCallCount; i < allCalls.length; i++) {
                 const call = allCalls[i]
-                await writer.write(encoder.encode(sseLine({
+                await writeChunk(sseLine({
                   id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
                   object: "chat.completion.chunk",
                   created: aggregate.created || Math.floor(Date.now() / 1000),
@@ -258,41 +281,43 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
                     },
                     finish_reason: null
                   }]
-                })))
+                }))
               }
-              await writer.write(encoder.encode(sseLine({
+              await writeChunk(sseLine({
                 id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
                 object: "chat.completion.chunk",
                 created: aggregate.created || Math.floor(Date.now() / 1000),
                 model: aggregate.model || "tool-bridge",
                 choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
                 ...(aggregate.usage ? { usage: aggregate.usage } : {})
-              })))
+              }))
             } else {
               // Flush any remaining final content not yet streamed progressively
               await flushFinalContentDelta()
               const fullFinal = extractStreamableFinalContent(aggregate.content) || result.message.content || ""
               const remaining = fullFinal.slice(finalContentSent)
               if (remaining) {
-                await writer.write(encoder.encode(sseLine({
+                await writeChunk(sseLine({
                   id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
                   object: "chat.completion.chunk",
                   created: aggregate.created || Math.floor(Date.now() / 1000),
                   model: aggregate.model || "tool-bridge",
                   choices: [{ index: 0, delta: { content: remaining }, finish_reason: null }]
-                })))
+                }))
               }
-              await writer.write(encoder.encode(sseLine({
+              await writeChunk(sseLine({
                 id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
                 object: "chat.completion.chunk",
                 created: aggregate.created || Math.floor(Date.now() / 1000),
                 model: aggregate.model || "tool-bridge",
                 choices: [{ index: 0, delta: {}, finish_reason: aggregate.finishReason || "stop" }],
                 ...(aggregate.usage ? { usage: aggregate.usage } : {})
-              })))
+              }))
             }
 
-            await writer.write(encoder.encode("data: [DONE]\n\n"))
+            await writeChunk("data: [DONE]\n\n")
+            streamClosed = true
+            stopHeartbeat()
             await writer.close()
             break
           }
@@ -332,6 +357,9 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
       } catch (err) {
         dbg({ ...dbgData, event: "stream_error", error: err.message })
         try { await writer.abort(err) } catch (e) {}
+      } finally {
+        streamClosed = true
+        stopHeartbeat()
       }
     })()
 
