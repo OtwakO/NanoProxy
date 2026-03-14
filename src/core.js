@@ -617,6 +617,9 @@ function encodeUserMessageForBridge(content, options = {}) {
   const toolNames = options.toolNames || [];
   const hasTodo = toolNames.includes("todowrite");
   const hasTask = toolNames.includes("task");
+  const toolListLine = toolNames.length
+    ? `- Available tool names: ${toolNames.join(", ")}`
+    : null;
   const callCountRule = isSingleCallFlavor(flavor)
     ? `- Use exactly one ${CALL_MODE_MARKER} block per reply.`
     : `- If several independent operations are immediately needed, you may include multiple ${CALL_MODE_MARKER} blocks in the same tool envelope.`;
@@ -659,6 +662,7 @@ function encodeUserMessageForBridge(content, options = {}) {
     "- Do not use [toolname] or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
     `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
+    toolListLine,
     planningHint,
     taskExample
   ].filter(Boolean).join("\n");
@@ -1155,17 +1159,7 @@ function parseAnyFencedJsonPayload(text) {
 
 function normalizeParsedToolCalls(rawCalls) {
   const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "pwd", "echo", "head", "tail", "mkdir", "rmdir"]);
-  const toolAliases = new Map([
-    ["read_file", "read"],
-    ["write_file", "write"],
-    ["edit_file", "edit"],
-    ["readfile", "read"],
-    ["writefile", "write"],
-    ["editfile", "edit"],
-    ["read-file", "read"],
-    ["write-file", "write"],
-    ["edit-file", "edit"]
-  ]);
+  const toolAliases = new Map();
   const normalizeToolName = (name) => {
     const raw = String(name || "").trim();
     const lower = raw.toLowerCase();
@@ -1976,6 +1970,10 @@ module.exports = {
   // Clone utility
   clone
 };
+
+
+
+
 
 
 
