@@ -81,16 +81,76 @@ function run() {
       { role: "user", content: "create a file" }
     ]
   });
-  assert.match(kimiRequest.rewritten.messages[0].content, /tool_name/);
-  assert.match(kimiRequest.rewritten.messages[0].content, /tool_input/);
-  assert.match(kimiRequest.rewritten.messages[1].content, /tool_name/);
-  assert.match(kimiRequest.rewritten.messages[1].content, /tool_input/);
   assert.match(kimiRequest.rewritten.messages[0].content, /Emit exactly one CALL block per tool reply/);
-  assert.match(kimiRequest.rewritten.messages[0].content, /Do not batch multiple tool calls in one reply/);
   assert.match(kimiRequest.rewritten.messages[0].content, /Do not emit \[\[CALL\]\] without first emitting \[\[OPENCODE_TOOL\]\]/);
-  assert.doesNotMatch(kimiRequest.rewritten.messages[0].content, /Each CALL JSON object must use name and arguments/);
+  assert.match(kimiRequest.rewritten.messages[0].content, /Each CALL JSON object must use name and arguments/);
+  assert.doesNotMatch(kimiRequest.rewritten.messages[0].content, /tool_name/);
+  assert.doesNotMatch(kimiRequest.rewritten.messages[0].content, /tool_input/);
   assert.doesNotMatch(kimiRequest.rewritten.messages[0].content, /Valid multi-tool example/);
   assert.match(kimiRequest.rewritten.messages[1].content, /Do not output a second \[\[CALL\]\] until the first tool result comes back/);
+
+  const zedLikeRequest = transformRequestForBridge({
+    model: "zai-org/glm-5:thinking",
+    tools: [
+      {
+        name: "edit_file",
+        description: "Edit a file",
+        parameters: {
+          type: "object",
+          properties: {
+            display_description: { type: "string" },
+            path: { type: "string" },
+            mode: { type: "string", enum: ["edit", "create", "overwrite"] }
+          },
+          required: ["display_description", "path", "mode"]
+        }
+      }
+    ],
+    messages: [
+      { role: "user", content: "create a file" }
+    ]
+  });
+  assert.doesNotMatch(zedLikeRequest.rewritten.messages[1].content, /content_b64/);
+  assert.doesNotMatch(zedLikeRequest.rewritten.messages[1].content, /oldString_b64/);
+  assert.doesNotMatch(zedLikeRequest.rewritten.messages[1].content, /newString_b64/);
+  assert.match(zedLikeRequest.rewritten.messages[1].content, /workspace-relative paths/);
+
+  const opencodeLikeRequest = transformRequestForBridge({
+    model: "zai-org/glm-5:thinking",
+    tools: [
+      {
+        name: "write",
+        description: "Write a file",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      },
+      {
+        name: "bash",
+        description: "Run shell commands",
+        parameters: {
+          type: "object",
+          properties: {
+            command: { type: "string" },
+            description: { type: "string" }
+          },
+          required: ["command", "description"]
+        }
+      }
+    ],
+    messages: [
+      { role: "user", content: "create a file" }
+    ]
+  });
+  assert.match(opencodeLikeRequest.rewritten.messages[0].content, /content_b64/);
+  assert.match(opencodeLikeRequest.rewritten.messages[0].content, /command_b64/);
+  assert.match(opencodeLikeRequest.rewritten.messages[1].content, /content_b64/);
+  assert.match(opencodeLikeRequest.rewritten.messages[1].content, /command_b64/);
 
   const requestWithToolResult = transformRequestForBridge({
     model: "zai-org/glm-5:thinking",
@@ -141,7 +201,6 @@ function run() {
   });
   const kimiBridgedToolResultMessage = kimiToolResultRequest.rewritten.messages.find((msg) => msg.role === "user" && /opencode-tool-result/.test(msg.content || ""));
   assert.ok(kimiBridgedToolResultMessage);
-  assert.match(kimiBridgedToolResultMessage.content, /Do not batch multiple tool calls in one reply/);
   assert.match(kimiBridgedToolResultMessage.content, /Always include the outer \[\[OPENCODE_TOOL\]\] \.\.\. \[\[\/OPENCODE_TOOL\]\] wrapper/);
 
   const requestWithTypedToolResult = transformRequestForBridge({

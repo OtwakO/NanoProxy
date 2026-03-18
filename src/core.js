@@ -557,6 +557,24 @@ function buildToolRequiredKeyMap(tools) {
   }
   return map;
 }
+
+function getBridgePromptCapabilities(tools) {
+  const toolArgKeyMap = buildToolArgumentKeyMap(tools);
+  const allKeys = new Set();
+  for (const keySet of toolArgKeyMap.values()) {
+    for (const key of keySet) allKeys.add(key);
+  }
+  const hasAny = (...keys) => keys.some((key) => allKeys.has(key));
+  const filePathKey = hasAny("filePath", "file_path", "filepath", "filename", "file", "path");
+
+  return {
+    hasCommandArg: hasAny("command"),
+    hasContentArg: hasAny("content"),
+    hasOldStringArg: hasAny("oldString", "old_string", "oldText", "old_text"),
+    hasNewStringArg: hasAny("newString", "new_string", "newText", "new_text"),
+    hasAnyFilePathArg: filePathKey
+  };
+}
 function compactSchema(schema, depth = 0) {
   if (!schema || typeof schema !== "object") return { type: "object" };
 
@@ -728,7 +746,9 @@ function encodeUserMessageForBridge(content, options = {}) {
   const text = typeof content === "string" ? content : "";
   const firstTurn = Boolean(options.firstTurn);
   const flavor = options.flavor || "default";
+  const tools = Array.isArray(options.tools) ? options.tools : [];
   const toolNames = options.toolNames || [];
+  const capabilities = getBridgePromptCapabilities(tools);
   const hasTodo = toolNames.includes("todowrite");
   const hasTask = toolNames.includes("task");
   const toolListLine = toolNames.length
@@ -773,9 +793,15 @@ function encodeUserMessageForBridge(content, options = {}) {
     "- Do not use [toolname] or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
     `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
-    "- For bash calls, always send `command_b64` (base64 UTF-8) instead of raw `command` to avoid JSON quoting issues.",
-    "- For write/edit calls, if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, you should send `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8) instead of the raw string.",
-    "- For file tools (read/write/edit/patch equivalents), always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`.",
+    capabilities.hasCommandArg
+      ? "- For tools that accept a `command` field, prefer `command_b64` (base64 UTF-8) instead of raw `command` when quoting or escaping could be fragile."
+      : null,
+    (capabilities.hasContentArg || capabilities.hasOldStringArg || capabilities.hasNewStringArg)
+      ? "- Only for tools whose schema actually includes these fields: if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, prefer `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8)."
+      : null,
+    capabilities.hasAnyFilePathArg
+      ? "- For tools that take file paths, always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`."
+      : null,
     toolListLine,
     planningHint,
     taskExample
@@ -785,6 +811,7 @@ function encodeUserMessageForBridge(content, options = {}) {
 function buildBridgeSystemMessage(tools, flavor = "default") {
   const catalog = compactToolCatalog(tools);
   const toolNames = tools.map(t => t.function?.name).filter(Boolean);
+  const capabilities = getBridgePromptCapabilities(tools);
   const buildExampleArgs = (schema, depth = 0) => {
     if (!schema || typeof schema !== "object") return { example: true };
     if (depth > 2) return {};
@@ -844,9 +871,15 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "- Do not output raw tool_calls JSON unless recovery is needed; CALL blocks are the required format.",
     "- Never invent tool names. Use one of the listed tool names exactly as provided.",
     "- Each CALL JSON object must use name and arguments. Do not use tool_name/tool_input.",
-    "- For bash calls, always send `command_b64` (base64 UTF-8) instead of raw `command`.",
-    "- For write/edit calls, if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, you must send `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8) instead of the raw string.",
-    "- For file tools (read/write/edit/patch equivalents), always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`.",
+    capabilities.hasCommandArg
+      ? "- Only for tools whose schema includes `command`: prefer `command_b64` (base64 UTF-8) instead of raw `command` when quoting or escaping could be fragile."
+      : null,
+    (capabilities.hasContentArg || capabilities.hasOldStringArg || capabilities.hasNewStringArg)
+      ? "- Only for tools whose schema actually includes these fields: if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, you may use `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8)."
+      : null,
+    capabilities.hasAnyFilePathArg
+      ? "- For tools that take file paths, always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`."
+      : null,
     callCountRule,
     isSingleCallFlavor(flavor)
       ? `- Do not emit ${CALL_MODE_MARKER} without first emitting ${TOOL_MODE_MARKER}.`
@@ -938,7 +971,7 @@ function translateMessagesForBridge(messages, tools, modelId) {
     if (message.role === "user") {
       out.push({
         role: "user",
-        content: encodeUserMessageForBridge(contentPartsToText(message.content), { firstTurn: !firstUserSeen, flavor, toolNames })
+        content: encodeUserMessageForBridge(contentPartsToText(message.content), { firstTurn: !firstUserSeen, flavor, toolNames, tools })
       });
       firstUserSeen = true;
       continue;
