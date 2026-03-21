@@ -4,16 +4,21 @@ const { randomUUID } = require("node:crypto");
 
 // Marker constants
 const TOOL_BLOCK_LABEL = "opencode-tool";
+const TALK_BLOCK_LABEL = "opencode-talk";
 const FINAL_BLOCK_LABEL = "opencode-final";
 const TOOL_RESULT_LABEL = "opencode-tool-result";
+const TALK_MODE_MARKER = "[[TALK]]";
 const TOOL_MODE_MARKER = "[[OPENCODE_TOOL]]";
 const FINAL_MODE_MARKER = "[[OPENCODE_FINAL]]";
+const TALK_MODE_END_MARKER = "[[/TALK]]";
 const TOOL_MODE_END_MARKER = "[[/OPENCODE_TOOL]]";
 const FINAL_MODE_END_MARKER = "[[/OPENCODE_FINAL]]";
 const CALL_MODE_MARKER = "[[CALL]]";
 const CALL_MODE_END_MARKER = "[[/CALL]]";
 const MAX_TOOL_CALLS_PER_TURN = 5;
 
+const TALK_MODE_MARKER_ALIASES = ["[TALK]", TALK_MODE_MARKER];
+const TALK_MODE_END_MARKER_ALIASES = ["[/TALK]", TALK_MODE_END_MARKER];
 const CALL_MODE_MARKER_ALIASES = ["[CALL]", CALL_MODE_MARKER];
 const CALL_MODE_END_MARKER_ALIASES = ["[/CALL]", CALL_MODE_END_MARKER];
 const TOOL_MODE_MARKER_ALIASES = ["[OPENCODE_TOOL]", TOOL_MODE_MARKER];
@@ -21,6 +26,8 @@ const FINAL_MODE_MARKER_ALIASES = ["[OPENCODE_FINAL]", FINAL_MODE_MARKER];
 const TOOL_MODE_END_MARKER_ALIASES = ["[/OPENCODE_TOOL]", TOOL_MODE_END_MARKER];
 const FINAL_MODE_END_MARKER_ALIASES = ["[/OPENCODE_FINAL]", FINAL_MODE_END_MARKER];
 
+const LOOSE_TALK_START_REGEX = /\[?\[{1,2}\s*TALK\s*\]{1,2}/i;
+const LOOSE_TALK_END_REGEX = /\[?\[{1,2}\s*\/\s*TALK\s*\]{1,2}/i;
 const LOOSE_TOOL_START_REGEX = /\[?\[{1,2}\s*OPENCODE_TOOLS?\s*\]{1,2}/i;
 const LOOSE_TOOL_END_REGEX = /\[?\[{1,2}\s*\/\s*OPENCODE_TOOLS?\s*\]{1,2}/i;
 const LOOSE_FINAL_START_REGEX = /\[?\[{1,2}\s*OPENCODE_FINAL\s*\]{1,2}/i;
@@ -681,6 +688,16 @@ function encodeToolCallsBlock(toolCalls, flavor = "default") {
   ].join("\n");
 }
 
+function encodeTalkBlock(content) {
+  const visible = contentPartsToText(content).trim();
+  if (!visible) return "";
+  return [
+    TALK_MODE_MARKER,
+    visible,
+    TALK_MODE_END_MARKER
+  ].join("\n");
+}
+
 function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
   const nextStepRule = isSingleCallFlavor(flavor)
     ? "Reply with exactly one CALL block inside one tool envelope, or one final envelope. Do not batch multiple tool calls in one reply."
@@ -725,13 +742,13 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
     editRecoveryHint,
     "",
     "Continue from this tool result.",
-    `Your next reply must use exactly one of these formats: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
+    `Your next reply must use structured envelopes. Valid patterns are ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}, optional ${TALK_MODE_MARKER} ... ${TALK_MODE_END_MARKER} followed by ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}, or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
     `For tool use, only use ${CALL_MODE_MARKER} ... ${CALL_MODE_END_MARKER} blocks inside ${TOOL_MODE_MARKER}.`,
+    `If you want to communicate progress to the user before acting, put that user-facing text inside ${TALK_MODE_MARKER} ... ${TALK_MODE_END_MARKER}. ${TALK_MODE_MARKER} is never the stopping point by itself.`,
     isSingleCallFlavor(flavor)
       ? `Always include the outer ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} wrapper.`
       : null,
-    "Do not narrate the next step in plain text.",
-    "Do not say what you are about to do.",
+    `Do not write normal prose outside ${TALK_MODE_MARKER}/${FINAL_MODE_MARKER}.`,
     "For file-editing calls, oldString must include enough unique surrounding context to match exactly one location.",
     "If an edit could match multiple places, read more context first and then send a larger oldString.",
     "Do not use legacy forms like [toolname] { ... } or raw tool_calls JSON unless recovery is needed.",
@@ -778,7 +795,9 @@ function encodeUserMessageForBridge(content, options = {}) {
     text,
     "",
     "Protocol requirements for your next reply:",
-    `- Start with ${TOOL_MODE_MARKER} or ${FINAL_MODE_MARKER}.`,
+    `- Start with ${TALK_MODE_MARKER}, ${TOOL_MODE_MARKER}, or ${FINAL_MODE_MARKER}.`,
+    `- ${TALK_MODE_MARKER} is for user-facing progress text. It is optional and it is not a stopping point by itself.`,
+    `- If you use ${TALK_MODE_MARKER} and more action is needed, follow it with ${TOOL_MODE_MARKER} in the same reply.`,
     `- If you need to inspect, search, read, edit, write, run commands, or plan work, reply with ${TOOL_MODE_MARKER}.`,
     `- Always include the outer ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} wrapper for tool use.`,
     `- Inside ${TOOL_MODE_MARKER}, only use ${CALL_MODE_MARKER} JSON ${CALL_MODE_END_MARKER}.`,
@@ -791,8 +810,8 @@ function encodeUserMessageForBridge(content, options = {}) {
     "- If a file-editing target is ambiguous, use the appropriate file-reading tool first instead of guessing a short oldString.",
     "- If you genuinely need clarification before acting, prefer the appropriate clarification tool instead of guessing.",
     "- Do not use [toolname] or any other bracketed legacy tool format.",
-    "- Do not narrate what you are about to do in plain text.",
-    `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
+    `- Do not write user-facing prose outside ${TALK_MODE_MARKER} or ${FINAL_MODE_MARKER}.`,
+    `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of plain prose.`,
     capabilities.hasCommandArg
       ? "- For tools that accept a `command` field, prefer `command_b64` (base64 UTF-8) instead of raw `command` when quoting or escaping could be fragile."
       : null,
@@ -845,13 +864,20 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Tool bridge mode is enabled.",
     "The upstream provider's native tool calling is disabled for this request.",
     "Your highest priority is protocol compliance.",
-    "Only two reply formats are valid.",
+    "Three structured envelopes are available: TALK, TOOL, and FINAL.",
     "Do not place tool markers or CALL blocks inside reasoning.",
-    `1. Tool format: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}`,
-    `2. Final format: ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}`,
+    `1. Talk format: ${TALK_MODE_MARKER} ... ${TALK_MODE_END_MARKER}`,
+    `2. Tool format: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}`,
+    `3. Final format: ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}`,
     "Do not output anything before the opening marker.",
-    "When you want to use a tool, do not answer in normal prose.",
-    `If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
+    `If you want to communicate progress to the user during work, use ${TALK_MODE_MARKER}.`,
+    `${TALK_MODE_MARKER} is optional and is never the stopping point by itself. If more action is needed, follow it with ${TOOL_MODE_MARKER} in the same reply.`,
+    `If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of plain prose.`,
+    "Do not output user-facing prose outside TALK or FINAL.",
+    "Talk format example:",
+    TALK_MODE_MARKER,
+    "I found the next file to change. I'll update it now.",
+    TALK_MODE_END_MARKER,
     "Tool format example:",
     TOOL_MODE_MARKER,
     CALL_MODE_MARKER,
@@ -866,7 +892,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     `- For each tool call, wrap it in ${CALL_MODE_MARKER} and ${CALL_MODE_END_MARKER}.`,
     `- If you emit multiple ${CALL_MODE_MARKER} blocks, fully finish one CALL's JSON object before opening the next ${CALL_MODE_MARKER}.`,
     "- Do not use markdown code fences for tool replies.",
-    "- Do not write any explanatory prose before, inside, or after the tool envelope.",
+    `- Do not write any explanatory prose inside or after the tool envelope. Use ${TALK_MODE_MARKER} before it if needed.`,
     "- Do not use legacy bracketed formats like [toolname].",
     "- Do not output raw tool_calls JSON unless recovery is needed; CALL blocks are the required format.",
     "- Never invent tool names. Use one of the listed tool names exactly as provided.",
@@ -901,6 +927,15 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Also invalid:",
     "[toolname] { ... }",
     "{\"tool_calls\":[...]}",
+    "Valid TALK + TOOL example:",
+    TALK_MODE_MARKER,
+    "I found the next file to change. I'll update it now.",
+    TALK_MODE_END_MARKER,
+    TOOL_MODE_MARKER,
+    CALL_MODE_MARKER,
+    JSON.stringify(callExample, null, 2),
+    CALL_MODE_END_MARKER,
+    TOOL_MODE_END_MARKER,
     "Valid response example:",
     TOOL_MODE_MARKER,
     CALL_MODE_MARKER,
@@ -926,7 +961,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     `- Output ${FINAL_MODE_MARKER} first and ${FINAL_MODE_END_MARKER} last.`,
     "- Do not use markdown or JSON for final answers.",
     "- Do not use JSON for final answers unless explicitly required.",
-    "- Do not mix normal prose before either marker.",
+    `- Do not mix normal prose before ${FINAL_MODE_MARKER}; use ${TALK_MODE_MARKER} earlier in the task if you need user-facing progress text.`,
     "Available tools:",
     JSON.stringify(catalog, null, 2)
   ].filter(Boolean).join("\n\n");
@@ -953,7 +988,10 @@ function translateMessagesForBridge(messages, tools, modelId) {
 
     if (message.role === "assistant") {
       if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-        out.push({ role: "assistant", content: encodeToolCallsBlock(message.tool_calls, flavor).trim() });
+        const visible = contentPartsToText(message.content).trim();
+        const talkBlock = encodeTalkBlock(visible);
+        const toolBlock = encodeToolCallsBlock(message.tool_calls, flavor).trim();
+        out.push({ role: "assistant", content: [talkBlock, toolBlock].filter(Boolean).join("\n") });
         continue;
       }
 
@@ -1581,18 +1619,14 @@ function stripAllTrailingFinalMarkerJunk(text) {
 
 function normalizeBridgeMarkers(text) {
   let source = String(text || "");
-  source = source.replace(/\[\s*\/+\s*\[\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_END_MARKER);
-  source = source.replace(/\[\s*\/+\s*\[\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_END_MARKER);
-  source = source.replace(/\[\s*\/+\s*\[\s*CALL\s*\]?\]?/gi, CALL_MODE_END_MARKER);
-  source = source.replace(/(^|[\r\n])\s*\/\s*OPENCODE_TOOLS?\s*\]?\]?/gi, `$1${TOOL_MODE_END_MARKER}`);
-  source = source.replace(/(^|[\r\n])\s*\/\s*OPENCODE_FINAL\s*\]?\]?/gi, `$1${FINAL_MODE_END_MARKER}`);
-  source = source.replace(/(^|[\r\n])\s*\/\s*CALL\s*\]?\]?/gi, `$1${CALL_MODE_END_MARKER}`);
-  source = source.replace(/\[?\[?\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_MARKER);
-  source = source.replace(/\[?\[?\s*\/\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_END_MARKER);
-  source = source.replace(/\[?\[?\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_MARKER);
-  source = source.replace(/\[?\[?\s*\/\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_END_MARKER);
-  source = source.replace(/(^|[\r\n])\s*\[\[?\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/gim, `$1${CALL_MODE_MARKER}\n`);
-  source = source.replace(/(^|[\r\n])\s*\[\[?\s*\/\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/gim, `$1${CALL_MODE_END_MARKER}\n`);
+  source = source.replace(/\[\[?\s*\/\s*TALK\s*\]?\]?/gi, TALK_MODE_END_MARKER);
+  source = source.replace(/\[\[?\s*\/\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_END_MARKER);
+  source = source.replace(/\[\[?\s*\/\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_END_MARKER);
+  source = source.replace(/\[\[?\s*\/\s*CALL\s*\]?\]?/gi, CALL_MODE_END_MARKER);
+  source = source.replace(/\[\[?\s*TALK\s*\]?\]?/gi, TALK_MODE_MARKER);
+  source = source.replace(/\[\[?\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_MARKER);
+  source = source.replace(/\[\[?\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_MARKER);
+  source = source.replace(/\[\[?\s*CALL\s*\]?\]?/gi, CALL_MODE_MARKER);
   return source;
 }
 
@@ -1677,6 +1711,63 @@ function extractProgressiveToolSource(text) {
   const callStart = findMarkerStart(normalized, CALL_MODE_MARKER_ALIASES, LOOSE_CALL_START_REGEX);
   if (callStart) return normalized.slice(callStart.index).trim();
   return null;
+}
+
+function extractTalkEnvelopes(text, allowPartial = false, includeMeta = false) {
+  const source = String(text || "");
+  const out = [];
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const next = findMarkerStart(source.slice(cursor), TALK_MODE_MARKER_ALIASES, LOOSE_TALK_START_REGEX);
+    if (!next) break;
+    const startIndex = cursor + next.index;
+    const afterStartIndex = startIndex + next.length;
+    const afterStart = source.slice(afterStartIndex);
+    const end = findMarkerEnd(afterStart, TALK_MODE_END_MARKER_ALIASES, LOOSE_TALK_END_REGEX);
+    if (!end) {
+      if (allowPartial) {
+        const text = afterStart.trim();
+        out.push(includeMeta ? { text, start: startIndex, end: source.length, partial: true } : text);
+      }
+      break;
+    }
+    const text = afterStart.slice(0, end.index).trim();
+    const meta = { text, start: startIndex, end: afterStartIndex + end.index + end.length, partial: false };
+    out.push(includeMeta ? meta : text);
+    cursor = meta.end;
+  }
+
+  return out;
+}
+
+function extractTalkContent(text) {
+  return extractTalkEnvelopes(normalizeBridgeMarkers(text), false, false)
+    .map((segment) => stripLeadingMarkerJunk(segment))
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+function stripTalkEnvelopes(text) {
+  const source = String(text || "");
+  const envelopes = extractTalkEnvelopes(source, false, true);
+  if (envelopes.length === 0) return source;
+  let out = "";
+  let cursor = 0;
+  for (const envelope of envelopes) {
+    out += source.slice(cursor, envelope.start);
+    cursor = envelope.end;
+  }
+  out += source.slice(cursor);
+  return out;
+}
+
+function mergeTalkAndContent(talkContent, content) {
+  const talk = String(talkContent || "").trim();
+  const visible = String(content || "").trim();
+  if (talk && visible) return talk + "\n\n" + visible;
+  return talk || visible;
 }
 
 function extractCallEnvelopes(text, allowPartial = false, includeMeta = false) {
@@ -1865,7 +1956,10 @@ function buildInvalidToolBlockRecoveryRequest(upstreamRequest) {
 
 function parseBridgeAssistantText(text, options = {}) {
   const normalizedText = normalizeBridgeMarkers(text);
-  const canonicalTool = extractAnyMarkerEnvelope(normalizedText, TOOL_MODE_MARKER_ALIASES, TOOL_MODE_END_MARKER_ALIASES);
+  const talkContent = extractTalkContent(normalizedText);
+  const talkStrippedText = stripTalkEnvelopes(normalizedText).trim();
+
+  const canonicalTool = extractAnyMarkerEnvelope(talkStrippedText, TOOL_MODE_MARKER_ALIASES, TOOL_MODE_END_MARKER_ALIASES);
   if (canonicalTool !== null) {
     const callEnvelopes = extractCallEnvelopes(canonicalTool);
     if (callEnvelopes.length > 0) {
@@ -1874,14 +1968,14 @@ function parseBridgeAssistantText(text, options = {}) {
         const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
-      if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
+      if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered, content: talkContent };
     }
     const toolCalls = bestEffortParseToolPayload(canonicalTool, options);
-    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
-    return { kind: "invalid_tool_block", raw: normalizedText };
+    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
+    return { kind: "invalid_tool_block", raw: talkStrippedText };
   }
 
-  const looseTool = extractLooseMarkerEnvelope(normalizedText, LOOSE_TOOL_START_REGEX, LOOSE_TOOL_END_REGEX);
+  const looseTool = extractLooseMarkerEnvelope(talkStrippedText, LOOSE_TOOL_START_REGEX, LOOSE_TOOL_END_REGEX);
   if (looseTool !== null) {
     const callEnvelopes = extractCallEnvelopes(looseTool);
     if (callEnvelopes.length > 0) {
@@ -1890,103 +1984,98 @@ function parseBridgeAssistantText(text, options = {}) {
         const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
-      if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
+      if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered, content: talkContent };
     }
     const toolCalls = bestEffortParseToolPayload(looseTool, options);
-    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
-    return { kind: "invalid_tool_block", raw: normalizedText };
+    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
+    return { kind: "invalid_tool_block", raw: talkStrippedText };
   }
 
-  const callOnlyEnvelopes = extractCallEnvelopes(normalizedText);
+  const callOnlyEnvelopes = extractCallEnvelopes(talkStrippedText);
   if (callOnlyEnvelopes.length > 0) {
     const recovered = [];
     for (const envelope of callOnlyEnvelopes) {
       const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
       if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
     }
-    if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
+    if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered, content: talkContent };
   }
 
-  const canonicalFinal = extractAnyMarkerEnvelope(normalizedText, FINAL_MODE_MARKER_ALIASES, FINAL_MODE_END_MARKER_ALIASES);
+  const canonicalFinal = extractAnyMarkerEnvelope(talkStrippedText, FINAL_MODE_MARKER_ALIASES, FINAL_MODE_END_MARKER_ALIASES);
   if (canonicalFinal !== null) {
-    return { kind: "final", content: stripLeadingMarkerJunk(canonicalFinal) };
+    return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(canonicalFinal)) };
   }
 
-  const looseFinal = extractLooseMarkerEnvelope(normalizedText, LOOSE_FINAL_START_REGEX, LOOSE_FINAL_END_REGEX);
+  const looseFinal = extractLooseMarkerEnvelope(talkStrippedText, LOOSE_FINAL_START_REGEX, LOOSE_FINAL_END_REGEX);
   if (looseFinal !== null) {
-    return { kind: "final", content: stripLeadingMarkerJunk(looseFinal) };
+    return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(looseFinal)) };
   }
 
-  if (startsWithAnyMarker(normalizedText, TOOL_MODE_MARKER_ALIASES)) {
-    return parseBridgeAssistantText(stripAnyMarker(normalizedText, TOOL_MODE_MARKER_ALIASES), options);
+  if (startsWithAnyMarker(talkStrippedText, TOOL_MODE_MARKER_ALIASES)) {
+    return parseBridgeAssistantText(mergeTalkAndContent(talkContent, stripAnyMarker(talkStrippedText, TOOL_MODE_MARKER_ALIASES)), options);
   }
 
-  if (startsWithAnyMarker(normalizedText, FINAL_MODE_MARKER_ALIASES)) {
-    return { kind: "final", content: stripLeadingMarkerJunk(stripAnyMarker(normalizedText, FINAL_MODE_MARKER_ALIASES)) };
+  if (startsWithAnyMarker(talkStrippedText, FINAL_MODE_MARKER_ALIASES)) {
+    return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(stripAnyMarker(talkStrippedText, FINAL_MODE_MARKER_ALIASES))) };
   }
 
-  const toolBlock = extractFencedBlock(normalizedText, TOOL_BLOCK_LABEL);
+  const toolBlock = extractFencedBlock(talkStrippedText, TOOL_BLOCK_LABEL);
   if (toolBlock) {
     const toolCalls = bestEffortParseToolPayload(toolBlock, options);
-    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
+    if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
   }
 
-  const finalBlock = extractFencedBlock(normalizedText, FINAL_BLOCK_LABEL);
+  const finalBlock = extractFencedBlock(talkStrippedText, FINAL_BLOCK_LABEL);
   if (finalBlock) {
     const parsed = tryParseJsonLenient(finalBlock);
     if (parsed.ok && parsed.value && typeof parsed.value === "object" && typeof parsed.value.content === "string") {
-      return { kind: "final", content: stripLeadingMarkerJunk(parsed.value.content) };
+      return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(parsed.value.content)) };
     }
-    return { kind: "final", content: stripLeadingMarkerJunk(finalBlock) };
+    return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(finalBlock)) };
   }
 
-  const fencedJson = parseAnyFencedJsonPayload(normalizedText);
+  const fencedJson = parseAnyFencedJsonPayload(talkStrippedText);
   if (fencedJson) {
     if (Array.isArray(fencedJson.tool_calls) || typeof fencedJson.name === "string") {
       const rawCalls = Array.isArray(fencedJson.tool_calls) ? fencedJson.tool_calls : [fencedJson];
       const toolCalls = normalizeParsedToolCalls(rawCalls, options);
-      if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
+      if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
     }
     if (typeof fencedJson.content === "string") {
-      return { kind: "final", content: stripLeadingMarkerJunk(fencedJson.content) };
+      return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(fencedJson.content)) };
     }
   }
 
-  const embedded = parseEmbeddedJsonPayload(normalizedText);
+  const embedded = parseEmbeddedJsonPayload(talkStrippedText);
   if (embedded) {
     if (Array.isArray(embedded.tool_calls) || typeof embedded.name === "string") {
-      const rawCalls = Array.isArray(embedded.tool_calls)
-        ? embedded.tool_calls
-        : [embedded];
+      const rawCalls = Array.isArray(embedded.tool_calls) ? embedded.tool_calls : [embedded];
       const toolCalls = normalizeParsedToolCalls(rawCalls, options);
-      if (toolCalls.length > 0) {
-        return { kind: "tool_calls", toolCalls };
-      }
+      if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
     }
-
     if (typeof embedded.content === "string") {
-      return { kind: "final", content: stripLeadingMarkerJunk(embedded.content) };
+      return { kind: "final", content: mergeTalkAndContent(talkContent, stripLeadingMarkerJunk(embedded.content)) };
     }
   }
 
-  const bracketNamedTool = extractBracketNamedToolBlock(normalizedText);
+  const bracketNamedTool = extractBracketNamedToolBlock(talkStrippedText);
   if (bracketNamedTool) {
     const toolCalls = normalizeParsedToolCalls([bracketNamedTool]);
-    if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
+    if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls, content: talkContent };
   }
 
-  const hasLooseToolOpen = LOOSE_TOOL_START_REGEX.test(normalizedText);
-  const hasLooseToolClose = LOOSE_TOOL_END_REGEX.test(normalizedText);
-  const hasStandaloneCallOpen = /(^|[\r\n])\s*\[\[?\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(normalizedText);
-  const hasStandaloneCallClose = /(^|[\r\n])\s*\[\[?\s*\/\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(normalizedText);
+  const hasLooseToolOpen = LOOSE_TOOL_START_REGEX.test(talkStrippedText);
+  const hasLooseToolClose = LOOSE_TOOL_END_REGEX.test(talkStrippedText);
+  const hasStandaloneCallOpen = /(^|[\r\n])\s*\[\[?\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(talkStrippedText);
+  const hasStandaloneCallClose = /(^|[\r\n])\s*\[\[?\s*\/\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(talkStrippedText);
   const looksLikeUnparsedToolEnvelope =
     (hasLooseToolOpen && (hasLooseToolClose || hasStandaloneCallOpen))
     || (hasStandaloneCallOpen && hasStandaloneCallClose);
   if (looksLikeUnparsedToolEnvelope) {
-    return { kind: "invalid_tool_block", raw: normalizedText };
+    return { kind: "invalid_tool_block", raw: talkStrippedText };
   }
 
-  return { kind: "plain", content: normalizedText || "" };
+  return { kind: "plain", content: mergeTalkAndContent(talkContent, talkStrippedText || normalizedText || "") };
 }
 
 function parseSSETranscript(text) {
@@ -2041,7 +2130,7 @@ function buildBridgeResultFromText(text, reasoning, options = {}) {
       kind: "tool_calls",
       message: {
         role: "assistant",
-        content: "",
+        content: parsed.content || "",
         reasoning_content: reasoning || "",
         tool_calls: parsed.toolCalls
       },
@@ -2142,6 +2231,10 @@ function extractStreamableFinalContent(content) {
   return stripAllTrailingFinalMarkerJunk(stripLeadingMarkerJunk(visible));
 }
 
+function extractStreamableTalkContent(content) {
+  return extractTalkContent(content);
+}
+
 function buildSSEFromBridge(aggregate, options = {}) {
   const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, options);
   const id = aggregate.id || `chatcmpl_${randomUUID()}`;
@@ -2168,6 +2261,15 @@ function buildSSEFromBridge(aggregate, options = {}) {
   }
 
   if (result.kind === "tool_calls") {
+    if (result.message.content) {
+      out += sseLine({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta: { content: result.message.content }, finish_reason: null }]
+      });
+    }
     for (const [index, call] of result.message.tool_calls.entries()) {
       out += sseLine({
         id,
@@ -2226,11 +2328,14 @@ function buildSSEFromBridge(aggregate, options = {}) {
 // Export all functions for use by both server and plugin
 module.exports = {
   // Constants
+  TALK_BLOCK_LABEL,
   TOOL_BLOCK_LABEL,
   FINAL_BLOCK_LABEL,
   TOOL_RESULT_LABEL,
+  TALK_MODE_MARKER,
   TOOL_MODE_MARKER,
   FINAL_MODE_MARKER,
+  TALK_MODE_END_MARKER,
   TOOL_MODE_END_MARKER,
   FINAL_MODE_END_MARKER,
   CALL_MODE_MARKER,
@@ -2253,6 +2358,7 @@ module.exports = {
   buildBridgeSystemMessage,
   translateMessagesForBridge,
   transformRequestForBridge,
+  encodeTalkBlock,
   encodeToolCallsBlock,
   encodeToolResultBlock,
   encodeUserMessageForBridge,
@@ -2272,6 +2378,7 @@ module.exports = {
   sseLine,
   applyChunkToAggregate,
   detectBridgeStreamMode,
+  extractStreamableTalkContent,
   extractStreamableFinalContent,
 
   // JSON utilities
@@ -2304,6 +2411,8 @@ module.exports = {
   extractBalancedSegment,
   extractPartialToolEnvelope,
   extractProgressiveToolSource,
+  extractTalkEnvelopes,
+  extractTalkContent,
   extractCallEnvelopes,
   extractCompletedToolCallObjectTexts,
   extractBracketNamedToolBlock,

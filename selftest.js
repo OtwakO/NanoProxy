@@ -286,6 +286,20 @@ function run() {
   assert.equal(parsedFinal.kind, "final");
   assert.equal(parsedFinal.content, "done");
 
+  const parsedTalkTool = parseBridgeAssistantText(
+    "[[TALK]]\nI found the file to change.\n[[/TALK]]\n[[OPENCODE_TOOL]]\n[[CALL]]\n{\"name\":\"write\",\"arguments\":{\"filePath\":\"a.txt\",\"content\":\"hi\"}}\n[[/CALL]]\n[[/OPENCODE_TOOL]]"
+  );
+  assert.equal(parsedTalkTool.kind, "tool_calls");
+  assert.equal(parsedTalkTool.content, "I found the file to change.");
+  assert.equal(parsedTalkTool.toolCalls[0].function.name, "write");
+
+  const parsedTalkFinal = parseBridgeAssistantText(
+    "[[TALK]]\nQuick note.\n[[/TALK]]\n[[OPENCODE_FINAL]]\nDone.\n[[/OPENCODE_FINAL]]"
+  );
+  assert.equal(parsedTalkFinal.kind, "final");
+  assert.match(parsedTalkFinal.content, /Quick note\./);
+  assert.match(parsedTalkFinal.content, /Done\./);
+
   const parsedWrappedTool = parseBridgeAssistantText(
     "I'll create it now.\n{\n  \"tool_calls\": [\n    {\n      \"name\": \"write\",\n      \"arguments\": {\n        \"filePath\": \"C:\\\\x\\\\a.txt\",\n        \"content\": \"hello\"\n      }\n    }\n  ]\n}"
   );
@@ -621,6 +635,13 @@ function run() {
   assert.equal(stillUsesContentMarkers.finishReason, "tool_calls");
   assert.equal(stillUsesContentMarkers.message.tool_calls[0].function.name, "write");
 
+
+  const talkResult = buildBridgeResultFromText(
+    "[[TALK]]\nI found the failing test.\n[[/TALK]]\n[[OPENCODE_TOOL]]\n[[CALL]]\n{\"name\":\"read\",\"arguments\":{\"filePath\":\"a.txt\"}}\n[[/CALL]]\n[[/OPENCODE_TOOL]]",
+    ""
+  );
+  assert.equal(talkResult.kind, "tool_calls");
+  assert.equal(talkResult.message.content, "I found the failing test.");
   const bashToolSchema = [
     {
       type: "function",

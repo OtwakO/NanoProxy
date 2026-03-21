@@ -47,6 +47,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   const applyChunkToAggregate = core.applyChunkToAggregate
   const extractProgressiveToolCalls = core.extractProgressiveToolCalls
   const extractCallEnvelopes = core.extractCallEnvelopes
+  const extractStreamableTalkContent = core.extractStreamableTalkContent
   const extractStreamableFinalContent = core.extractStreamableFinalContent
   const MAX_TOOL_CALLS_PER_TURN = core.MAX_TOOL_CALLS_PER_TURN
   const buildToolArgumentKeyMap = core.buildToolArgumentKeyMap
@@ -146,6 +147,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
     let rawBuffer = ""
     let reasoningSent = 0
+    let talkContentSent = 0
     let finalContentSent = 0
     let emittedToolCallCount = 0
     const rawSseFile = `${dbgData.requestId}-stream.sse`
@@ -183,10 +185,21 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
       }))
     }
 
+    const flushTalkDelta = async () => {
+      const streamable = extractStreamableTalkContent(aggregate.content)
+      if (!streamable || streamable.length <= talkContentSent) return
+      const deltaText = streamable.slice(talkContentSent)
+      talkContentSent = streamable.length
+      await writeChunk(sseLine({
+        id: aggregate.id || `chatcmpl_${generateToolCallId()}`,
+        object: "chat.completion.chunk",
+        created: aggregate.created || Math.floor(Date.now() / 1000),
+        model: aggregate.model || "tool-bridge",
+        choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }]
+      }))
+    }
+
     const flushFinalContentDelta = async () => {
-      // Only start streaming once we've confirmed this is a final answer,
-      // not a tool call. We wait until [[OPENCODE_FINAL]] appears in the buffer
-      // so we never accidentally stream raw [[OPENCODE_TOOL]] envelope text.
       if (!aggregate.content.includes("OPENCODE_FINAL")) return
       const streamable = extractStreamableFinalContent(aggregate.content)
       if (!streamable || streamable.length <= finalContentSent) return
@@ -262,6 +275,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
                 reader = retryResponse.body.getReader()
                 rawBuffer = ""
                 reasoningSent = 0
+                talkContentSent = 0
                 finalContentSent = 0
                 emittedToolCallCount = 0
                 aggregate.id = null
@@ -304,6 +318,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
                 reader = retryResponse.body.getReader()
                 rawBuffer = ""
                 reasoningSent = 0
+                talkContentSent = 0
                 finalContentSent = 0
                 emittedToolCallCount = 0
                 aggregate.id = null
@@ -325,6 +340,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
             })
 
             if (result.kind === "tool_calls") {
+              await flushTalkDelta()
               const allCalls = result.message.tool_calls || []
               for (let i = emittedToolCallCount; i < allCalls.length; i++) {
                 const call = allCalls[i]
@@ -356,7 +372,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
                 ...(aggregate.usage ? { usage: aggregate.usage } : {})
               }))
             } else {
-              // Flush any remaining final content not yet streamed progressively
+              await flushTalkDelta()
               await flushFinalContentDelta()
               const fullFinal = extractStreamableFinalContent(aggregate.content) || result.message.content || ""
               const remaining = fullFinal.slice(finalContentSent)
@@ -404,6 +420,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
             applyChunkToAggregate(aggregate, parsed.value)
             await flushReasoningDelta()
+            await flushTalkDelta()
             await flushProgressiveToolCallsFunc()
             if (emittedToolCallCount >= MAX_TOOL_CALLS_PER_TURN) {
               cappedAtToolLimit = true
