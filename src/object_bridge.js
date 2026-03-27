@@ -48,10 +48,15 @@ function buildObjectToolManifest(normalizedTools) {
   });
 }
 
+function toolExists(normalizedTools, name) {
+  const target = canonicalizeToolName(name);
+  return (Array.isArray(normalizedTools) ? normalizedTools : []).some((tool) => canonicalizeToolName(tool && tool.name) === target);
+}
 
 function buildObjectBridgeSystemMessage(normalizedTools, parallelAllowed = true, inheritedSystemText = "") {
   const manifest = JSON.stringify(buildObjectToolManifest(normalizedTools), null, 2);
   const exampleTool = normalizedTools[0];
+  const completionToolRequired = toolExists(normalizedTools, "attempt_completion");
   const exampleArgs = {};
   if (exampleTool && Array.isArray(exampleTool.args)) {
     for (const arg of exampleTool.args) exampleArgs[arg.name] = arg.type === "string" ? "example" : {};
@@ -80,6 +85,9 @@ function buildObjectBridgeSystemMessage(normalizedTools, parallelAllowed = true,
     '- "message" must always be a user-facing string.',
     '- When mode is "tool", "tool_calls" must be a non-empty array.',
     '- When mode is "final" or "clarify", do not include "tool_calls".',
+    completionToolRequired
+      ? '- IMPORTANT: The tool "attempt_completion" is available in this session. When you have finished successfully, do NOT use mode "final". Use mode "tool" and call "attempt_completion" for the completion turn.'
+      : '- Use mode "final" for a plain successful completion when no more tools are needed.',
     '- Prefer each tool call object to use "name" and an "arguments" object. Flattened argument fields are also accepted when needed.',
     parallelAllowed
       ? '- You may batch multiple tool calls only when they are clearly independent. Keep batches sensible; do not try to complete an entire task in one oversized turn.'
@@ -92,7 +100,9 @@ function buildObjectBridgeSystemMessage(normalizedTools, parallelAllowed = true,
       message: "I will inspect the file now.",
       tool_calls: exampleTool ? [{ name: exampleTool.name, arguments: exampleArgs }] : [{ name: "read", arguments: { path: "example" } }]
     }, null, 2),
-    JSON.stringify({ v: 1, mode: "final", message: "Done. The task is complete." }, null, 2),
+    completionToolRequired
+      ? JSON.stringify({ v: 1, mode: "tool", message: "The task is complete. I will submit the final result now.", tool_calls: [{ name: "attempt_completion", arguments: { result: "Done. The task is complete." } }] }, null, 2)
+      : JSON.stringify({ v: 1, mode: "final", message: "Done. The task is complete." }, null, 2),
     JSON.stringify({ v: 1, mode: "clarify", message: "Which file do you want me to update?" }, null, 2),
     "",
     "Tool manifest:",
@@ -587,6 +597,8 @@ function cleanupLooseFieldValue(rawValue) {
   if (text.startsWith('"')) {
     text = text.slice(1);
     text = text.replace(/"\s*(?:,\s*)?[}\]]*\s*$/, "");
+    const reparsed = tryParseJson(`"${text}"`);
+    if (reparsed.ok && typeof reparsed.value === "string") return reparsed.value;
     return decodeLooseBridgeString(text);
   }
   const parsed = parseLooseJsonValue(text.replace(/,\s*$/, ""));
@@ -1050,6 +1062,8 @@ module.exports = {
   buildSSEFromObjectBridge,
   StreamingObjectParser
 };
+
+
 
 
 

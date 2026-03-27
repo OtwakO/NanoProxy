@@ -683,6 +683,26 @@ function withBridgeProtocol(protocol, fn) {
   console.log('  PASS: object bridge assistant history encoding');
 })();
 
+// ---- Test: object bridge only requires attempt_completion when that tool exists ----
+(function testObjectBridgeAttemptCompletionPromptHint() {
+  withBridgeProtocol('object', () => {
+    const withAttempt = core.transformRequestForBridge({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Finish the task.' }],
+      tools: [{ type: 'function', function: { name: 'attempt_completion', parameters: { type: 'object', properties: { result: { type: 'string' } } } } }]
+    });
+    const withoutAttempt = core.transformRequestForBridge({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Finish the task.' }],
+      tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }]
+    });
+    assert.match(withAttempt.rewritten.messages[0].content, /attempt_completion/);
+    assert.match(withAttempt.rewritten.messages[0].content, /do NOT use mode "final"/i);
+    assert.doesNotMatch(withoutAttempt.rewritten.messages[0].content, /attempt_completion/);
+  });
+  console.log('  PASS: object bridge attempt_completion prompt hint');
+})();
+
 // ---- Test: object bridge accepts fenced JSON output ----
 (function testBuildBridgeResultFromFencedObjectText() {
   withBridgeProtocol('object', () => {
@@ -748,6 +768,16 @@ function withBridgeProtocol(protocol, fn) {
   });
   console.log('  PASS: buildBridgeResultFromMalformedWriteBatch');
 })();
+// ---- Test: malformed salvage preserves Windows path segments like \tests without turning them into tabs ----
+(function testMalformedWriteBatchPreservesWindowsPathEscapes() {
+  withBridgeProtocol('object', () => {
+    const malformed = '{"v":1,"mode":"tool","message":"Writing lock test.","tool_calls":[{"name":"write","filePath":"C:\\\\Cline_test\\\\tests\\\\test-lock.js","content":"module.exports = "ok"\n"}]}'
+    const result = core.buildBridgeResultFromText(malformed, '', [{ name: 'write', args: [{ name: 'filePath' }, { name: 'content' }] }]);
+    assert.equal(result.kind, 'tool_calls');
+    assert.equal(JSON.parse(result.message.tool_calls[0].function.arguments).filePath, 'C:\\Cline_test\\tests\\test-lock.js');
+  });
+  console.log('  PASS: testMalformedWriteBatchPreservesWindowsPathEscapes');
+})();
 // ---- Test: object bridge accepts top-level tool-call arrays ----
 (function testBuildBridgeResultFromTopLevelToolArray() {
   withBridgeProtocol('object', () => {
@@ -766,6 +796,8 @@ function withBridgeProtocol(protocol, fn) {
   console.error(error);
   process.exitCode = 1;
 });
+
+
 
 
 
